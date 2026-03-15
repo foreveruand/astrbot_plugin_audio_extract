@@ -1,0 +1,21 @@
+{
+  "work_dir": {
+    "type": "string",
+    "default": "resources/audio_extract",
+    "description": "工作目录，用于存放临时文件和任务信息"
+  },
+  "out_dir": {
+    "type": "string",
+    "default": "/tmp/audio_extract",
+    "description": "输出目录，用于存放提取的 MP3 文件和字幕文件"
+  },
+  "scan_dirs": {
+    "type": "list",
+    "default": [],
+    "description": "文件扫描目录列表，用于建立文件索引",
+    "items": {
+      "type": "string"
+    },
+    "hint": "例如: [\"/path/to/videos\", \"/path/to/media\"]"
+  }
+}

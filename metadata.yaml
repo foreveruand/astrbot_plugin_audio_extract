@@ -1,0 +1,4 @@
+name: 音频提取插件
+desc: Extract audio from video files and clip videos using FFmpeg
+author: AstrBot
+version: 1.0.0
