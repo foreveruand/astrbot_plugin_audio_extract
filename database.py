@@ -5,6 +5,8 @@ import os
 import sqlite3
 import time
 
+from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
+
 logger = logging.getLogger("astrbot")
 
 VIDEO_EXTS = ["mp4", "mkv", "mov", "wmv", "flv", "webm", "ts", "flac"]
@@ -15,8 +17,11 @@ class LocalIndex:
 
     def __init__(self, db_name: str):
         # Get plugin directory
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        self.db_path = os.path.join(script_dir, db_name)
+        script_dir = get_astrbot_plugin_data_path()
+        self.db_path = str(
+            os.path.join(script_dir, "astrbot_plugin_audio_extract", db_name)
+        )
+        logger.info(f"Initializing LocalIndex database at: {script_dir}")
         self.create_tables()
 
     def _get_conn(self):
