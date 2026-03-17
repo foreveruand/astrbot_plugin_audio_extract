@@ -8,12 +8,15 @@ video clipping by time range, subtitle sync, and file index management.
 import json
 import logging
 import shutil
+import uuid
+from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
 
-from astrbot.core.utils.path_utils import get_data_dir
+from astrbot.core.platform.sources.telegram.tg_event import TelegramCallbackQueryEvent
+from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from astrbot.api import AstrBotConfig, star
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
 from astrbot.api.util import SessionController, session_waiter
 
 from .ffmpeg_utils import (
@@ -29,6 +32,9 @@ logger = logging.getLogger("astrbot")
 
 SESSION_TIMEOUT = 300
 
+# Store inline keyboard session state for Telegram platform
+KEYBOARD_SESSIONS: dict[str, dict] = {}
+
 
 class Main(star.Star):
     """Main class for the Audio Extract plugin."""
@@ -38,6 +44,26 @@ class Main(star.Star):
         self.context = context
         self.config = config
         self._initialized = False
+
+    async def _send_stream_updates(
+        self,
+        event: AstrMessageEvent,
+        stream_factory: Callable[[], AsyncGenerator[str, None]],
+    ) -> None:
+        """Send progress updates using message edits when possible."""
+
+        async def chain_stream():
+            last = ""
+            async for text in stream_factory():
+                if not text or text == last:
+                    continue
+                last = text
+                yield event.make_result().message(text)
+
+        try:
+            await event.send_streaming(chain_stream())
+        except Exception as exc:  # pragma: no cover - platform specific
+            logger.warning(f"Streaming delivery failed: {exc}")
 
     async def initialize(self) -> None:
         """Called when the plugin is activated."""
@@ -51,7 +77,7 @@ class Main(star.Star):
 
     async def _init(self) -> None:
         """Initialize plugin components."""
-        self.data_path = get_data_dir() / "astrbot_plugin_audio_extract"
+        self.data_path = Path(get_astrbot_data_path() , "astrbot_plugin_audio_extract")
         self.data_path.mkdir(parents=True, exist_ok=True)
 
         self.work_dir = Path(self.config.get("work_dir", self.data_path))
@@ -280,6 +306,127 @@ class Main(star.Star):
 
         return sorted(indices) if indices else None
 
+    def _build_inline_keyboard(
+        self, session_id: str, results: list[str], selected: set[int]
+    ) -> list[list[dict]]:
+        """Build inline keyboard buttons for file selection."""
+        buttons = []
+        # File buttons (3 per row)
+        for i in range(0, len(results), 3):
+            row = []
+            for j in range(3):
+                idx = i + j
+                if idx >= len(results):
+                    break
+                file_name = Path(results[idx]).name
+                # Truncate long filenames
+                display_name = file_name[:10] + "..." if len(file_name) > 10 else file_name
+                prefix = "✓ " if idx in selected else ""
+                row.append({
+                    "text": f"{prefix}{idx + 1}. {display_name}",
+                    "callback_data": f"auex:{session_id}:{idx}",
+                })
+            buttons.append(row)
+
+        # Action buttons
+        action_row = [
+            {"text": "全部", "callback_data": f"auex:{session_id}:all"},
+            {"text": "确认", "callback_data": f"auex:{session_id}:confirm"},
+            {"text": "取消", "callback_data": f"auex:{session_id}:cancel"},
+        ]
+        buttons.append(action_row)
+
+        return buttons
+
+    @filter.callback_query()
+    async def handle_auex_callback(self, event: TelegramCallbackQueryEvent) -> None:
+        """Handle inline keyboard button clicks for auex command."""
+        if not event.data.startswith("auex:"):
+            return
+
+        parts = event.data.split(":")
+        if len(parts) < 3:
+            return
+
+        session_id = parts[1]
+        action = parts[2]
+
+        session = KEYBOARD_SESSIONS.get(session_id)
+        if not session:
+            await event.answer_callback_query(text="会话已过期，请重新发送命令")
+            return
+
+        results = session["results"]
+        selected = session["selected"]
+
+        if action == "cancel":
+            # Cancel operation
+            del KEYBOARD_SESSIONS[session_id]
+            await event.answer_callback_query(text="已取消操作")
+            result = MessageEventResult()
+            result.message("已取消操作。")
+            event.set_result(result)
+            return
+
+        if action == "all":
+            # Select all files
+            selected.clear()
+            selected.update(range(len(results)))
+            session["selected"] = selected
+
+            await event.answer_callback_query(text=f"已选择全部 {len(results)} 个文件")
+
+            # Update keyboard
+            result = MessageEventResult()
+            result.message(f"🔍 已选择全部 {len(results)} 个文件")
+            result.inline_keyboard(self._build_inline_keyboard(session_id, results, selected))
+            event.set_result(result)
+            return
+
+        if action == "confirm":
+            # Confirm selection
+            if not selected:
+                await event.answer_callback_query(text="请至少选择一个文件")
+                return
+
+            selected_files = [results[i] for i in sorted(selected)]
+            del KEYBOARD_SESSIONS[session_id]
+
+            await event.answer_callback_query(text=f"已选择 {len(selected_files)} 个文件，开始处理...")
+
+            result = MessageEventResult()
+            result.message(f"✅ 已选择 {len(selected_files)} 个文件，开始处理...")
+            event.set_result(result)
+
+            # Process audio extraction
+            await self._process_audio_extraction(event, selected_files)
+            return
+
+        # Toggle file selection
+        try:
+            file_idx = int(action)
+            if file_idx in selected:
+                selected.discard(file_idx)
+                await event.answer_callback_query(text=f"已取消选择文件 {file_idx + 1}")
+            else:
+                selected.add(file_idx)
+                await event.answer_callback_query(text=f"已选择文件 {file_idx + 1}")
+
+            session["selected"] = selected
+
+            # Build selection status message
+            selected_count = len(selected)
+            msg = f"🔍 已选择 {selected_count} 个文件" if selected_count > 0 else "🔍 请选择文件"
+
+            # Update keyboard
+            result = MessageEventResult()
+            result.message(msg)
+            result.inline_keyboard(self._build_inline_keyboard(session_id, results, selected))
+            event.set_result(result)
+
+        except ValueError:
+            await event.answer_callback_query(text="无效操作")
+
     @filter.command("auex")
     async def auex(self, event: AstrMessageEvent):
         """Extract audio from video files.
@@ -311,7 +458,28 @@ class Main(star.Star):
             await self._process_audio_extraction(event, results)
             return
 
-        # Multiple files - let user select
+        # Multiple files - check platform for inline keyboard support
+        is_telegram = event.get_platform_name() == "telegram"
+
+        if is_telegram:
+            # Use inline keyboard for Telegram
+            session_id = uuid.uuid4().hex[:8]
+            KEYBOARD_SESSIONS[session_id] = {
+                "results": results,
+                "selected": set(),
+                "keyword": keyword,
+            }
+
+            msg = f"🔍 找到 {len(results)} 个匹配「{keyword}」的文件"
+            result = MessageEventResult()
+            result.message(msg)
+            result.inline_keyboard(
+                self._build_inline_keyboard(session_id, results, set())
+            )
+            event.set_result(result)
+            return
+
+        # Non-Telegram platforms: use text selection
         msg = self._build_file_list_message(results, keyword)
         yield event.plain_result(msg)
 
@@ -371,30 +539,26 @@ class Main(star.Star):
 
             cmd = build_audio_extract_command(video_path, temp_mp3_path)
 
-            status_msg = f"[{i}/{len(video_paths)}] 提取中: {video_name[:30]}"
-            await event.send(event.plain_result(status_msg))
+            async def progress_stream() -> AsyncGenerator[str, None]:
+                base_prefix = f"[{i}/{len(video_paths)}] {video_name[:30]}"
+                yield f"{base_prefix} 提取中..."
+                async for status, msg in ffmpeg_progress_generator(cmd):
+                    if status == "progress":
+                        yield f"{base_prefix}\n{msg}"
+                    elif status == "success":
+                        shutil.move(temp_mp3_path, mp3_path)
+                        yield f"{base_prefix} ✅ 音频提取完成"
+                        return
+                    elif status == "failed":
+                        Path(job_file).unlink(missing_ok=True)
+                        yield f"{base_prefix} ❌ 失败: {msg}"
+                        return
+                    elif status == "exception":
+                        Path(job_file).unlink(missing_ok=True)
+                        yield f"{base_prefix} ❌ 出错: {msg}"
+                        return
 
-            async for status, msg in ffmpeg_progress_generator(cmd):
-                if status == "progress":
-                    await event.send(
-                        event.plain_result(
-                            f"[{i}/{len(video_paths)}] {video_name[:20]}\n{msg}"
-                        )
-                    )
-                elif status == "success":
-                    shutil.move(temp_mp3_path, mp3_path)
-                    await event.send(
-                        event.plain_result(
-                            f"[{i}/{len(video_paths)}] ✅ {video_name[:30]} 音频提取完成"
-                        )
-                    )
-                elif status == "failed":
-                    await event.send(
-                        event.plain_result(
-                            f"[{i}/{len(video_paths)}] ❌ {video_name[:30]} 失败: {msg}"
-                        )
-                    )
-                    Path(job_file).unlink(missing_ok=True)
+            await self._send_stream_updates(event, progress_stream)
 
         await event.send(
             event.plain_result(f"✅ 全部完成! 共处理 {len(video_paths)} 个文件")
