@@ -5,6 +5,7 @@ This plugin provides audio extraction from video files using FFmpeg,
 video clipping by time range, subtitle sync, and file index management.
 """
 
+import asyncio
 import json
 import logging
 import shutil
@@ -12,12 +13,16 @@ import uuid
 from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
 
-from astrbot.core.platform.sources.telegram.tg_event import TelegramCallbackQueryEvent
-from astrbot.core.utils.astrbot_path import get_astrbot_data_path
-
 from astrbot.api import AstrBotConfig, star
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
+from astrbot.api.message_components import Plain
 from astrbot.api.util import SessionController, session_waiter
+from astrbot.core.message.message_event_result import MessageChain
+from astrbot.core.platform.sources.telegram.tg_event import (
+    TelegramCallbackQueryEvent,
+    TelegramPlatformEvent,
+)
+from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .ffmpeg_utils import (
     build_audio_extract_command,
@@ -50,20 +55,88 @@ class Main(star.Star):
         event: AstrMessageEvent,
         stream_factory: Callable[[], AsyncGenerator[str, None]],
     ) -> None:
-        """Send progress updates using message edits when possible."""
+        """Send progress updates by editing a single message.
 
-        async def chain_stream():
-            last = ""
+        On Telegram, this sends one message and edits it for each update.
+        On other platforms, falls back to sending individual messages.
+        """
+        # Check if we're on Telegram and can use message editing
+        is_telegram = isinstance(event, TelegramPlatformEvent)
+
+        if is_telegram:
+            await self._send_progress_telegram(event, stream_factory)
+        else:
+            # Fallback: send messages one by one on other platforms
             async for text in stream_factory():
-                if not text or text == last:
-                    continue
-                last = text
-                yield event.make_result().message(text)
+                if text:
+                    await event.send(MessageChain([Plain(text)]))
 
-        try:
-            await event.send_streaming(chain_stream())
-        except Exception as exc:  # pragma: no cover - platform specific
-            logger.warning(f"Streaming delivery failed: {exc}")
+    async def _send_progress_telegram(
+        self,
+        event: TelegramPlatformEvent,
+        stream_factory: Callable[[], AsyncGenerator[str, None]],
+    ) -> None:
+        """Send progress updates on Telegram using message editing."""
+        from astrbot.core.platform.astrbot_message import MessageType
+
+        if event.get_message_type() == MessageType.GROUP_MESSAGE:
+            chat_id = event.message_obj.group_id
+        else:
+            chat_id = event.get_sender_id()
+
+        # Handle supergroup thread_id
+        message_thread_id = None
+        if isinstance(chat_id, str) and "#" in chat_id:
+            chat_id, message_thread_id = chat_id.split("#")
+
+        message_id = None
+        last_update_time = 0.0
+        throttle_interval = 0.5  # Minimum interval between edits (seconds)
+        last_text = ""
+
+        async for text in stream_factory():
+            if not text:
+                continue
+
+            current_time = asyncio.get_running_loop().time()
+
+            # Throttle: skip if too soon since last update (unless first message)
+            if message_id and (current_time - last_update_time) < throttle_interval:
+                continue
+
+            try:
+                if message_id is None:
+                    # Send initial message
+                    payload = {"chat_id": chat_id, "text": text}
+                    if message_thread_id:
+                        payload["message_thread_id"] = int(message_thread_id)
+                    msg = await event.client.send_message(**payload)
+                    message_id = msg.message_id
+                    last_text = text
+                else:
+                    # Edit existing message (only if text changed)
+                    if text != last_text:
+                        await event.client.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            text=text,
+                        )
+                        last_text = text
+
+                last_update_time = current_time
+            except Exception as exc:
+                logger.warning(f"Failed to send/edit progress message: {exc}")
+                # If edit fails, try sending a new message
+                try:
+                    payload = {"chat_id": chat_id, "text": text}
+                    if message_thread_id:
+                        payload["message_thread_id"] = int(message_thread_id)
+                    msg = await event.client.send_message(**payload)
+                    message_id = msg.message_id
+                    last_text = text
+                    last_update_time = current_time
+                except Exception as exc2:
+                    logger.error(f"Failed to send fallback message: {exc2}")
 
     async def initialize(self) -> None:
         """Called when the plugin is activated."""
