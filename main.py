@@ -757,7 +757,7 @@ class Main(star.Star):
             )
 
             async def progress_stream() -> AsyncGenerator[str, None]:
-                base_prefix = f"[{i}/{len(video_paths)}] {video_path_obj.name[:30]}"
+                base_prefix = f"[{i}/{len(video_paths)}] `{video_path_obj.name}`"
                 yield f"{base_prefix} 剪辑中...\n⏱ {start_time} → {end_time}"
                 async for status, msg in ffmpeg_progress_generator(cmd):
                     if status == "progress":
