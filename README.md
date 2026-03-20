@@ -81,12 +81,21 @@ The plugin automatically runs the following scheduled tasks:
 - MP4, MKV, MOV, WMV, FLV, WebM, TS
 - FLAC (with LRC conversion)
 
+## Changelog
+
+### v1.1.0
+
+- **vclip 命令优化**: 进度更新改为编辑消息而非发送新消息（Telegram 平台）
+- 添加消息编辑节流机制（0.5秒间隔），避免频繁 API 调用
+- 文本变化检测，仅在实际内容变化时才编辑消息
+
 ## Notes
 
 1. Ensure FFmpeg is properly installed
 2. Configure `scan_dirs` with directories containing your media files
 3. The file index is stored in `file_index.db` in the plugin directory
 4. Output files are saved to the configured `out_dir`
+5. **This plugin includes a `callback_query` handler for Telegram inline keyboards (prefix: `auex:`). **
 
 ## Migration from NoneBot
 

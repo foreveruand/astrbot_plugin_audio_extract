@@ -756,34 +756,26 @@ class Main(star.Star):
                 video_path, str(output_path), start_time, end_time
             )
 
-            await event.send(
-                event.plain_result(
-                    f"[{i}/{len(video_paths)}] 剪辑中: {video_path_obj.name}\n⏱ {start_time} → {end_time}"
-                )
-            )
+            async def progress_stream() -> AsyncGenerator[str, None]:
+                base_prefix = f"[{i}/{len(video_paths)}] {video_path_obj.name[:30]}"
+                yield f"{base_prefix} 剪辑中...\n⏱ {start_time} → {end_time}"
+                async for status, msg in ffmpeg_progress_generator(cmd):
+                    if status == "progress":
+                        yield f"{base_prefix}\n{msg}"
+                    elif status == "success":
+                        yield f"{base_prefix} ✅ 剪辑完成\n📁 {output_path.name}"
+                        return
+                    elif status == "failed":
+                        yield f"{base_prefix} ❌ 剪辑失败: {msg}"
+                        return
+                    elif status == "exception":
+                        yield f"{base_prefix} ❌ 出错: {msg}"
+                        return
 
-            async for status, msg in ffmpeg_progress_generator(cmd):
-                if status == "progress":
-                    await event.send(
-                        event.plain_result(
-                            f"[{i}/{len(video_paths)}] {video_path_obj.stem}\n{msg}"
-                        )
-                    )
-                elif status == "success":
-                    await event.send(
-                        event.plain_result(
-                            f"[{i}/{len(video_paths)}] ✅ 剪辑完成\n📁 {output_path.name}"
-                        )
-                    )
-                elif status == "failed":
-                    await event.send(
-                        event.plain_result(
-                            f"[{i}/{len(video_paths)}] ❌ 剪辑失败: {msg}"
-                        )
-                    )
+            await self._send_stream_updates(event, progress_stream)
 
         await event.send(
-            event.plain_result(f"✅ 全部完成! 共剪辑 {len(video_paths)} 个文件")
+            MessageChain([Plain(f"✅ 全部完成! 共剪辑 {len(video_paths)} 个文件")])
         )
 
     @filter.command("aurebuild")

@@ -2,5 +2,5 @@ name: astrbot_plugin_audio_extract
 display_name: 音频提取插件
 desc: Extract audio from video files and clip videos using FFmpeg
 author: foreveruand
-version: 1.0.0
+version: 1.1.0
 repo: https://github.com/foreveruand/astrbot_plugin_audio_extract
