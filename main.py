@@ -18,10 +18,7 @@ from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
 from astrbot.api.message_components import Plain
 from astrbot.api.util import SessionController, session_waiter
 from astrbot.core.message.message_event_result import MessageChain
-from astrbot.core.platform.sources.telegram.tg_event import (
-    TelegramCallbackQueryEvent,
-    TelegramPlatformEvent,
-)
+from astrbot.core.platform.sources.telegram.tg_event import TelegramCallbackQueryEvent
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .ffmpeg_utils import (
@@ -55,88 +52,14 @@ class Main(star.Star):
         event: AstrMessageEvent,
         stream_factory: Callable[[], AsyncGenerator[str, None]],
     ) -> None:
-        """Send progress updates by editing a single message.
+        """Send progress updates through AstrBot's cross-platform streaming API."""
 
-        On Telegram, this sends one message and edits it for each update.
-        On other platforms, falls back to sending individual messages.
-        """
-        # Check if we're on Telegram and can use message editing
-        is_telegram = isinstance(event, TelegramPlatformEvent)
-
-        if is_telegram:
-            await self._send_progress_telegram(event, stream_factory)
-        else:
-            # Fallback: send messages one by one on other platforms
+        async def chain_stream() -> AsyncGenerator[MessageChain, None]:
             async for text in stream_factory():
                 if text:
-                    await event.send(MessageChain([Plain(text)]))
+                    yield MessageChain([Plain(text)])
 
-    async def _send_progress_telegram(
-        self,
-        event: TelegramPlatformEvent,
-        stream_factory: Callable[[], AsyncGenerator[str, None]],
-    ) -> None:
-        """Send progress updates on Telegram using message editing."""
-        from astrbot.core.platform.astrbot_message import MessageType
-
-        if event.get_message_type() == MessageType.GROUP_MESSAGE:
-            chat_id = event.message_obj.group_id
-        else:
-            chat_id = event.get_sender_id()
-
-        # Handle supergroup thread_id
-        message_thread_id = None
-        if isinstance(chat_id, str) and "#" in chat_id:
-            chat_id, message_thread_id = chat_id.split("#")
-
-        message_id = None
-        last_update_time = 0.0
-        throttle_interval = 0.5  # Minimum interval between edits (seconds)
-        last_text = ""
-
-        async for text in stream_factory():
-            if not text:
-                continue
-
-            current_time = asyncio.get_running_loop().time()
-
-            # Throttle: skip if too soon since last update (unless first message)
-            if message_id and (current_time - last_update_time) < throttle_interval:
-                continue
-
-            try:
-                if message_id is None:
-                    # Send initial message
-                    payload = {"chat_id": chat_id, "text": text}
-                    if message_thread_id:
-                        payload["message_thread_id"] = int(message_thread_id)
-                    msg = await event.client.send_message(**payload)
-                    message_id = msg.message_id
-                    last_text = text
-                else:
-                    # Edit existing message (only if text changed)
-                    if text != last_text:
-                        await event.client.edit_message_text(
-                            chat_id=chat_id,
-                            message_id=message_id,
-                            text=text,
-                        )
-                        last_text = text
-
-                last_update_time = current_time
-            except Exception as exc:
-                logger.warning(f"Failed to send/edit progress message: {exc}")
-                # If edit fails, try sending a new message
-                try:
-                    payload = {"chat_id": chat_id, "text": text}
-                    if message_thread_id:
-                        payload["message_thread_id"] = int(message_thread_id)
-                    msg = await event.client.send_message(**payload)
-                    message_id = msg.message_id
-                    last_text = text
-                    last_update_time = current_time
-                except Exception as exc2:
-                    logger.error(f"Failed to send fallback message: {exc2}")
+        await event.send_streaming(chain_stream(), use_fallback=True)
 
     async def initialize(self) -> None:
         """Called when the plugin is activated."""
@@ -614,21 +537,21 @@ class Main(star.Star):
 
             async def progress_stream() -> AsyncGenerator[str, None]:
                 base_prefix = f"[{i}/{len(video_paths)}] {video_name[:30]}"
-                yield f"{base_prefix} 提取中..."
+                yield f"{base_prefix} 提取中...\n"
                 async for status, msg in ffmpeg_progress_generator(cmd):
                     if status == "progress":
-                        yield f"{base_prefix}\n{msg}"
+                        yield f"• {msg}\n"
                     elif status == "success":
                         shutil.move(temp_mp3_path, mp3_path)
-                        yield f"{base_prefix} ✅ 音频提取完成"
+                        yield f"{base_prefix} ✅ 音频提取完成\n"
                         return
                     elif status == "failed":
                         Path(job_file).unlink(missing_ok=True)
-                        yield f"{base_prefix} ❌ 失败: {msg}"
+                        yield f"{base_prefix} ❌ 失败: {msg}\n"
                         return
                     elif status == "exception":
                         Path(job_file).unlink(missing_ok=True)
-                        yield f"{base_prefix} ❌ 出错: {msg}"
+                        yield f"{base_prefix} ❌ 出错: {msg}\n"
                         return
 
             await self._send_stream_updates(event, progress_stream)
@@ -758,18 +681,18 @@ class Main(star.Star):
 
             async def progress_stream() -> AsyncGenerator[str, None]:
                 base_prefix = f"[{i}/{len(video_paths)}] `{video_path_obj.name}`"
-                yield f"{base_prefix} 剪辑中...\n⏱ {start_time} → {end_time}"
+                yield f"{base_prefix} 剪辑中...\n⏱ {start_time} → {end_time}\n"
                 async for status, msg in ffmpeg_progress_generator(cmd):
                     if status == "progress":
-                        yield f"{base_prefix}\n{msg}"
+                        yield f"• {msg}\n"
                     elif status == "success":
-                        yield f"{base_prefix} ✅ 剪辑完成\n📁 {output_path.name}"
+                        yield f"{base_prefix} ✅ 剪辑完成\n📁 {output_path.name}\n"
                         return
                     elif status == "failed":
-                        yield f"{base_prefix} ❌ 剪辑失败: {msg}"
+                        yield f"{base_prefix} ❌ 剪辑失败: {msg}\n"
                         return
                     elif status == "exception":
-                        yield f"{base_prefix} ❌ 出错: {msg}"
+                        yield f"{base_prefix} ❌ 出错: {msg}\n"
                         return
 
             await self._send_stream_updates(event, progress_stream)
