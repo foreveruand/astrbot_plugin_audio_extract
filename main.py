@@ -12,13 +12,20 @@ import shutil
 import uuid
 from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
+from typing import Any
+
+import telegramify_markdown
 
 from astrbot.api import AstrBotConfig, star
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
 from astrbot.api.message_components import Plain
 from astrbot.api.util import SessionController, session_waiter
 from astrbot.core.message.message_event_result import MessageChain
-from astrbot.core.platform.sources.telegram.tg_event import TelegramCallbackQueryEvent
+from astrbot.core.platform.astrbot_message import MessageType
+from astrbot.core.platform.sources.telegram.tg_event import (
+    TelegramCallbackQueryEvent,
+    TelegramPlatformEvent,
+)
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .ffmpeg_utils import (
@@ -47,19 +54,167 @@ class Main(star.Star):
         self.config = config
         self._initialized = False
 
+    def _platform_supports_progress_edit(self, event: AstrMessageEvent) -> bool:
+        """Return whether the current event supports in-place progress updates."""
+        return isinstance(event, (TelegramPlatformEvent, TelegramCallbackQueryEvent))
+
+    def _format_telegram_text(self, text: str) -> tuple[str, dict[str, Any]]:
+        """Convert text to Telegram-safe MarkdownV2 when possible."""
+        if not text:
+            return text, {}
+
+        try:
+            return telegramify_markdown.markdownify(text), {"parse_mode": "MarkdownV2"}
+        except Exception as exc:
+            logger.warning(f"Telegram markdown conversion failed, using plain text: {exc}")
+            return text, {}
+
+    async def _edit_telegram_message(
+        self,
+        event: TelegramPlatformEvent | TelegramCallbackQueryEvent,
+        text: str,
+        *,
+        message_id: int | None = None,
+    ) -> bool:
+        """Try to edit a Telegram progress message in place."""
+        formatted_text, text_kwargs = self._format_telegram_text(text)
+
+        try:
+            if isinstance(event, TelegramCallbackQueryEvent):
+                if event.inline_message_id:
+                    await event.client.edit_message_text(
+                        text=formatted_text,
+                        inline_message_id=event.inline_message_id,
+                        **text_kwargs,
+                    )
+                    return True
+
+                if event.message:
+                    await event.client.edit_message_text(
+                        text=formatted_text,
+                        chat_id=event.message.chat.id,
+                        message_id=message_id or event.message.message_id,
+                        **text_kwargs,
+                    )
+                    return True
+                return False
+
+            if event.get_message_type() == MessageType.GROUP_MESSAGE:
+                chat_id = event.message_obj.group_id
+            else:
+                chat_id = event.get_sender_id()
+
+            if isinstance(chat_id, str) and "#" in chat_id:
+                chat_id, _ = chat_id.split("#", 1)
+
+            if message_id is None:
+                return False
+
+            await event.client.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=formatted_text,
+                **text_kwargs,
+            )
+            return True
+        except Exception as exc:
+            logger.warning(f"Failed to edit Telegram progress message: {exc}")
+            return False
+
+    async def _send_telegram_progress_message(
+        self,
+        event: TelegramPlatformEvent | TelegramCallbackQueryEvent,
+        text: str,
+    ) -> int | None:
+        """Send a Telegram progress message and return its message ID when available."""
+        formatted_text, text_kwargs = self._format_telegram_text(text)
+
+        try:
+            if isinstance(event, TelegramCallbackQueryEvent):
+                if event.message:
+                    msg = await event.client.send_message(
+                        chat_id=event.message.chat.id,
+                        text=formatted_text,
+                        **text_kwargs,
+                    )
+                    return msg.message_id
+                return None
+
+            if event.get_message_type() == MessageType.GROUP_MESSAGE:
+                chat_id = event.message_obj.group_id
+            else:
+                chat_id = event.get_sender_id()
+
+            payload: dict[str, Any] = {
+                "chat_id": chat_id,
+                "text": formatted_text,
+                **text_kwargs,
+            }
+            if isinstance(chat_id, str) and "#" in chat_id:
+                chat_id, message_thread_id = chat_id.split("#", 1)
+                payload["chat_id"] = chat_id
+                payload["message_thread_id"] = int(message_thread_id)
+
+            msg = await event.client.send_message(**payload)
+            return msg.message_id
+        except Exception as exc:
+            logger.warning(f"Failed to send Telegram progress message: {exc}")
+            return None
+
+    async def _send_progress_telegram(
+        self,
+        event: TelegramPlatformEvent | TelegramCallbackQueryEvent,
+        stream_factory: Callable[[], AsyncGenerator[str, None]],
+    ) -> None:
+        """Send progress updates on Telegram using in-place message editing."""
+        message_id: int | None = None
+        last_update_time = 0.0
+        throttle_interval = 0.5
+        last_text = ""
+
+        async for text in stream_factory():
+            if not text or text == last_text:
+                continue
+
+            current_time = asyncio.get_running_loop().time()
+            if last_text and (current_time - last_update_time) < throttle_interval:
+                continue
+
+            edited = False
+            if isinstance(event, TelegramCallbackQueryEvent):
+                edited = await self._edit_telegram_message(event, text, message_id=message_id)
+            elif message_id is not None:
+                edited = await self._edit_telegram_message(event, text, message_id=message_id)
+
+            if not edited:
+                new_message_id = await self._send_telegram_progress_message(event, text)
+                if new_message_id is not None:
+                    message_id = new_message_id
+
+            last_text = text
+            last_update_time = current_time
+
     async def _send_stream_updates(
         self,
         event: AstrMessageEvent,
         stream_factory: Callable[[], AsyncGenerator[str, None]],
     ) -> None:
-        """Send progress updates through AstrBot's cross-platform streaming API."""
+        """Prefer in-place progress updates; otherwise send only key milestones."""
+        if self._platform_supports_progress_edit(event):
+            await self._send_progress_telegram(event, stream_factory)
+            return
 
-        async def chain_stream() -> AsyncGenerator[MessageChain, None]:
-            async for text in stream_factory():
-                if text:
-                    yield MessageChain([Plain(text)])
+        key_updates: list[str] = []
+        async for text in stream_factory():
+            normalized = text.strip()
+            if not normalized:
+                continue
+            if any(token in normalized for token in ("✅", "❌", "完成", "失败", "出错")):
+                if normalized not in key_updates:
+                    key_updates.append(normalized)
 
-        await event.send_streaming(chain_stream(), use_fallback=True)
+        for update in key_updates:
+            await event.send(MessageChain([Plain(update)]))
 
     async def initialize(self) -> None:
         """Called when the plugin is activated."""
@@ -537,21 +692,21 @@ class Main(star.Star):
 
             async def progress_stream() -> AsyncGenerator[str, None]:
                 base_prefix = f"[{i}/{len(video_paths)}] {video_name[:30]}"
-                yield f"{base_prefix} 提取中...\n"
+                yield f"{base_prefix} 提取中..."
                 async for status, msg in ffmpeg_progress_generator(cmd):
                     if status == "progress":
-                        yield f"• {msg}\n"
+                        yield f"{base_prefix}\n{msg}"
                     elif status == "success":
                         shutil.move(temp_mp3_path, mp3_path)
-                        yield f"{base_prefix} ✅ 音频提取完成\n"
+                        yield f"{base_prefix} ✅ 音频提取完成"
                         return
                     elif status == "failed":
                         Path(job_file).unlink(missing_ok=True)
-                        yield f"{base_prefix} ❌ 失败: {msg}\n"
+                        yield f"{base_prefix} ❌ 失败: {msg}"
                         return
                     elif status == "exception":
                         Path(job_file).unlink(missing_ok=True)
-                        yield f"{base_prefix} ❌ 出错: {msg}\n"
+                        yield f"{base_prefix} ❌ 出错: {msg}"
                         return
 
             await self._send_stream_updates(event, progress_stream)
@@ -681,18 +836,18 @@ class Main(star.Star):
 
             async def progress_stream() -> AsyncGenerator[str, None]:
                 base_prefix = f"[{i}/{len(video_paths)}] `{video_path_obj.name}`"
-                yield f"{base_prefix} 剪辑中...\n⏱ {start_time} → {end_time}\n"
+                yield f"{base_prefix} 剪辑中...\n⏱ {start_time} → {end_time}"
                 async for status, msg in ffmpeg_progress_generator(cmd):
                     if status == "progress":
-                        yield f"• {msg}\n"
+                        yield f"{base_prefix}\n{msg}"
                     elif status == "success":
-                        yield f"{base_prefix} ✅ 剪辑完成\n📁 {output_path.name}\n"
+                        yield f"{base_prefix} ✅ 剪辑完成\n📁 {output_path.name}"
                         return
                     elif status == "failed":
-                        yield f"{base_prefix} ❌ 剪辑失败: {msg}\n"
+                        yield f"{base_prefix} ❌ 剪辑失败: {msg}"
                         return
                     elif status == "exception":
-                        yield f"{base_prefix} ❌ 出错: {msg}\n"
+                        yield f"{base_prefix} ❌ 出错: {msg}"
                         return
 
             await self._send_stream_updates(event, progress_stream)

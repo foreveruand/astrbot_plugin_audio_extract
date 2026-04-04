@@ -83,6 +83,12 @@ The plugin automatically runs the following scheduled tasks:
 
 ## Changelog
 
+### v1.1.2
+
+- 修复 Telegram 平台下进度消息未正确启用 MarkdownV2 的问题
+- 调整进度更新策略：支持编辑的平台使用覆盖式更新，不支持的平台仅发送关键过程与结果消息
+- 优化多平台回退逻辑，减少刷屏并保持插件兼容性
+
 ### v1.1.0
 
 - **vclip 命令优化**: 进度更新改为编辑消息而非发送新消息（Telegram 平台）
