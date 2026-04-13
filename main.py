@@ -492,7 +492,9 @@ class Main(star.Star):
     @filter.callback_query()
     async def handle_auex_callback(self, event: TelegramCallbackQueryEvent) -> None:
         """Handle inline keyboard button clicks for auex command."""
-        if not event.data.startswith("auex:"):
+        data = (event.data or "").strip()
+        if not data.startswith(f"auex:"):
+            event.continue_event()
             return
 
         parts = event.data.split(":")
