@@ -26,7 +26,7 @@ from astrbot.core.platform.sources.telegram.tg_event import (
     TelegramCallbackQueryEvent,
     TelegramPlatformEvent,
 )
-from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
 from .ffmpeg_utils import (
     build_audio_extract_command,
@@ -228,11 +228,11 @@ class Main(star.Star):
 
     async def _init(self) -> None:
         """Initialize plugin components."""
-        self.data_path = Path(get_astrbot_data_path() , "astrbot_plugin_audio_extract")
+        self.data_path = Path(get_astrbot_plugin_data_path() , self.name)
         self.data_path.mkdir(parents=True, exist_ok=True)
 
-        self.work_dir = Path(self.config.get("work_dir", self.data_path))
-        self.out_dir = Path(self.config.get("out_dir", "/tmp/audio_extract"))
+        self.work_dir = self.data_path
+        self.out_dir = Path(self.config.get("out_dir", self.data_path / "output"))
 
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.out_dir.mkdir(parents=True, exist_ok=True)

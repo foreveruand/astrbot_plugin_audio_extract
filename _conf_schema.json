@@ -1,13 +1,8 @@
 {
-  "work_dir": {
-    "type": "string",
-    "default": "plugin_data/audio_extract",
-    "description": "工作目录，用于存放临时文件和任务信息"
-  },
   "out_dir": {
     "type": "string",
-    "default": "/tmp/audio_extract",
-    "description": "输出目录，用于存放提取的 MP3 文件和字幕文件"
+    "default": "plugin_data/astrbot_plugin_audio_extract/output",
+    "description": "（绝对路径）输出目录，用于存放提取的 MP3 文件和字幕文件"
   },
   "scan_dirs": {
     "type": "list",
