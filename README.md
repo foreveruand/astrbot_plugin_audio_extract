@@ -48,14 +48,16 @@ Search for video files matching the keyword and extract audio as MP3.
 
 ```
 /vclip <keyword> <start_time> <end_time>
+/vclip <keyword> <HMMSS-HMMSS>
 ```
 
-Clip video segment by time range. Time format: `HH:MM:SS` or `MM:SS`.
+Clip video segment by time range. Time format: `HH:MM:SS`, `MM:SS`, or compact interval `HMMSS-HMMSS` / `HHMMSS-HHMMSS`.
 
 **Example:**
 ```
 /vclip movie 00:05:30 00:10:45
 /vclip video 5:30 10:45
+/vclip movie 10101-20356
 ```
 
 ### Index Rebuild (Admin)
@@ -82,6 +84,11 @@ The plugin automatically runs the following scheduled tasks:
 - FLAC (with LRC conversion)
 
 ## Changelog
+
+### v1.1.3
+
+- `vclip` 新增支持紧凑时间区间格式：`HMMSS-HMMSS` / `HHMMSS-HHMMSS`
+- 示例：`/vclip movie 10101-20356` 会自动解析为 `01:01:01 -> 02:03:56`
 
 ### v1.1.2
 

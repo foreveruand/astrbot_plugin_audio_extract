@@ -33,6 +33,7 @@ from .ffmpeg_utils import (
     build_video_clip_command,
     ffmpeg_progress_generator,
     normalize_time_format,
+    parse_compact_time_interval,
     validate_time_format,
 )
 from .file_selector import FileSelector, LocalIndexDB
@@ -66,7 +67,9 @@ class Main(star.Star):
         try:
             return telegramify_markdown.markdownify(text), {"parse_mode": "MarkdownV2"}
         except Exception as exc:
-            logger.warning(f"Telegram markdown conversion failed, using plain text: {exc}")
+            logger.warning(
+                f"Telegram markdown conversion failed, using plain text: {exc}"
+            )
             return text, {}
 
     async def _edit_telegram_message(
@@ -182,9 +185,13 @@ class Main(star.Star):
 
             edited = False
             if isinstance(event, TelegramCallbackQueryEvent):
-                edited = await self._edit_telegram_message(event, text, message_id=message_id)
+                edited = await self._edit_telegram_message(
+                    event, text, message_id=message_id
+                )
             elif message_id is not None:
-                edited = await self._edit_telegram_message(event, text, message_id=message_id)
+                edited = await self._edit_telegram_message(
+                    event, text, message_id=message_id
+                )
 
             if not edited:
                 new_message_id = await self._send_telegram_progress_message(event, text)
@@ -209,7 +216,9 @@ class Main(star.Star):
             normalized = text.strip()
             if not normalized:
                 continue
-            if any(token in normalized for token in ("✅", "❌", "完成", "失败", "出错")):
+            if any(
+                token in normalized for token in ("✅", "❌", "完成", "失败", "出错")
+            ):
                 if normalized not in key_updates:
                     key_updates.append(normalized)
 
@@ -228,7 +237,7 @@ class Main(star.Star):
 
     async def _init(self) -> None:
         """Initialize plugin components."""
-        self.data_path = Path(get_astrbot_plugin_data_path() , self.name)
+        self.data_path = Path(get_astrbot_plugin_data_path(), self.name)
         self.data_path.mkdir(parents=True, exist_ok=True)
 
         self.work_dir = self.data_path
@@ -471,12 +480,16 @@ class Main(star.Star):
                     break
                 file_name = Path(results[idx]).name
                 # Truncate long filenames
-                display_name = file_name[:10] + "..." if len(file_name) > 10 else file_name
+                display_name = (
+                    file_name[:10] + "..." if len(file_name) > 10 else file_name
+                )
                 prefix = "✓ " if idx in selected else ""
-                row.append({
-                    "text": f"{prefix}{idx + 1}. {display_name}",
-                    "callback_data": f"auex:{session_id}:{idx}",
-                })
+                row.append(
+                    {
+                        "text": f"{prefix}{idx + 1}. {display_name}",
+                        "callback_data": f"auex:{session_id}:{idx}",
+                    }
+                )
             buttons.append(row)
 
         # Action buttons
@@ -493,7 +506,7 @@ class Main(star.Star):
     async def handle_auex_callback(self, event: TelegramCallbackQueryEvent) -> None:
         """Handle inline keyboard button clicks for auex command."""
         data = (event.data or "").strip()
-        if not data.startswith(f"auex:"):
+        if not data.startswith("auex:"):
             event.continue_event()
             return
 
@@ -532,7 +545,9 @@ class Main(star.Star):
             # Update keyboard
             result = MessageEventResult()
             result.message(f"🔍 已选择全部 {len(results)} 个文件")
-            result.inline_keyboard(self._build_inline_keyboard(session_id, results, selected))
+            result.inline_keyboard(
+                self._build_inline_keyboard(session_id, results, selected)
+            )
             event.set_result(result)
             return
 
@@ -545,11 +560,9 @@ class Main(star.Star):
             selected_files = [results[i] for i in sorted(selected)]
             del KEYBOARD_SESSIONS[session_id]
 
-            await event.answer_callback_query(text=f"已选择 {len(selected_files)} 个文件，开始处理...")
-
-            result = MessageEventResult()
-            result.message(f"✅ 已选择 {len(selected_files)} 个文件，开始处理...")
-            event.set_result(result)
+            await event.answer_callback_query(
+                text=f"已选择 {len(selected_files)} 个文件，开始处理..."
+            )
 
             # Process audio extraction
             await self._process_audio_extraction(event, selected_files)
@@ -569,12 +582,18 @@ class Main(star.Star):
 
             # Build selection status message
             selected_count = len(selected)
-            msg = f"🔍 已选择 {selected_count} 个文件" if selected_count > 0 else "🔍 请选择文件"
+            msg = (
+                f"🔍 已选择 {selected_count} 个文件"
+                if selected_count > 0
+                else "🔍 请选择文件"
+            )
 
             # Update keyboard
             result = MessageEventResult()
             result.message(msg)
-            result.inline_keyboard(self._build_inline_keyboard(session_id, results, selected))
+            result.inline_keyboard(
+                self._build_inline_keyboard(session_id, results, selected)
+            )
             event.set_result(result)
 
         except ValueError:
@@ -723,29 +742,50 @@ class Main(star.Star):
 
         Usage:
             /vclip <keyword> <start_time> <end_time> - Clip video segment
-            Time format: HH:MM:SS or MM:SS
+            /vclip <keyword> <HMMSS-HMMSS> - Clip by compact time interval
+            Time format: HH:MM:SS, MM:SS, or HMMSS-HMMSS / HHMMSS-HHMMSS
             Example: /vclip movie 00:05:30 00:10:45
+            Example: /vclip movie 10101-20356
         """
         await self.initialize()
 
         message = event.message_str.strip()
         parts = message.replace("vclip", "", 1).strip().split()
 
-        if len(parts) < 3:
+        if len(parts) < 2:
             yield event.plain_result(
-                "用法: /vclip <关键词> <开始时间> <结束时间>\n"
-                "时间格式: HH:MM:SS 或 MM:SS\n"
-                "示例: /vclip movie 00:05:30 00:10:45"
+                "用法:\n"
+                "/vclip <关键词> <开始时间> <结束时间>\n"
+                "/vclip <关键词> <HMMSS-HMMSS>\n"
+                "时间格式: HH:MM:SS、MM:SS 或 HMMSS-HMMSS/HHMMSS-HHMMSS\n"
+                "示例: /vclip movie 00:05:30 00:10:45\n"
+                "示例: /vclip movie 10101-20356"
             )
             return
 
         keyword = parts[0]
-        start_time = parts[1].replace("：", ":")
-        end_time = parts[2].replace("：", ":")
+        start_time = ""
+        end_time = ""
 
-        if not validate_time_format(start_time) or not validate_time_format(end_time):
-            yield event.plain_result("无效的时间格式，请使用 HH:MM:SS 或 MM:SS")
-            return
+        if len(parts) >= 3:
+            start_time = parts[1].replace("：", ":")
+            end_time = parts[2].replace("：", ":")
+
+            if not validate_time_format(start_time) or not validate_time_format(
+                end_time
+            ):
+                yield event.plain_result("无效的时间格式，请使用 HH:MM:SS 或 MM:SS")
+                return
+        else:
+            compact_interval = parts[1].strip().replace("－", "-")
+            parsed_interval = parse_compact_time_interval(compact_interval)
+            if not parsed_interval:
+                yield event.plain_result(
+                    "无效的时间区间格式，请使用 HMMSS-HMMSS 或 HHMMSS-HHMMSS\n"
+                    "示例: 10101-20356"
+                )
+                return
+            start_time, end_time = parsed_interval
 
         start_time = normalize_time_format(start_time)
         end_time = normalize_time_format(end_time)
@@ -837,13 +877,13 @@ class Main(star.Star):
             )
 
             async def progress_stream() -> AsyncGenerator[str, None]:
-                base_prefix = f"[{i}/{len(video_paths)}] `{video_path_obj.name}`"
+                base_prefix = f"[{i}/{len(video_paths)}] `{video_path_obj.stem}`"
                 yield f"{base_prefix} 剪辑中...\n⏱ {start_time} → {end_time}"
                 async for status, msg in ffmpeg_progress_generator(cmd):
                     if status == "progress":
                         yield f"{base_prefix}\n{msg}"
                     elif status == "success":
-                        yield f"{base_prefix} ✅ 剪辑完成\n📁 {output_path.name}"
+                        yield f"{base_prefix} ✅ 剪辑完成\n📁 `{output_path.name}`"
                         return
                     elif status == "failed":
                         yield f"{base_prefix} ❌ 剪辑失败: {msg}"

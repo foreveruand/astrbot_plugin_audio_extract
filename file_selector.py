@@ -84,6 +84,25 @@ class FileSelector:
         results = await search_files_async(keyword, limit=limit)
 
         if results is None:
+            paths = []
+        else:
+            paths = list(results)
+
+        # If searching files yields no results, try searching directories
+        if len(paths) < 1:
+            dirs = await search_files_async(keyword, is_dir=True, limit=limit)
+
+            if dirs is None or len(dirs) == 0:
+                return []
+
+            for dir_path in dirs:
+                paths.extend(
+                    LocalIndexDB.list_video_files_recursive(dir_path, limit=limit)
+                )
+            if len(paths) > 1:
+                return paths
+
+        if results is None:
             # No results, trigger index rebuild
             logger.info(f"No results found, triggering index rebuild for: {keyword}")
             scan_dirs = self.config.get("scan_dirs", [])
@@ -97,26 +116,7 @@ class FileSelector:
                 results = await search_files_async(keyword, limit=limit)
                 if results is not None:
                     break
-
-            # Still no results
-            if results is None or len(results) == 0:
-                return []
-
-        paths = list(results)
-
-        # If searching files yields no results, try searching directories
-        if len(paths) < 1:
-            dirs = await search_files_async(keyword, is_dir=True, limit=limit)
-
-            if dirs is None or len(dirs) == 0:
-                return []
-
-            for dir_path in dirs:
-                paths.extend(
-                    LocalIndexDB.list_video_files_recursive(dir_path, limit=limit)
-                )
-
-        return paths
+        return results
 
     def build_file_list_message(self, paths: list[str], extra_info: str = "") -> str:
         """Build file list message."""

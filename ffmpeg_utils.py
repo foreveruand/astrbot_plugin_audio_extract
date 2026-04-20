@@ -175,3 +175,47 @@ def normalize_time_format(time_str: str) -> str:
     if len(parts) == 2:  # MM:SS
         return f"00:{parts[0]}:{parts[1]}"
     return time_str  # HH:MM:SS
+
+
+def parse_compact_time_format(time_str: str) -> str | None:
+    """Parse compact time format to HH:MM:SS.
+
+    Supported formats:
+    - HMMSS (e.g. 10101 -> 01:01:01)
+    - HHMMSS (e.g. 120305 -> 12:03:05)
+    """
+    if not time_str.isdigit() or len(time_str) not in (5, 6):
+        return None
+
+    if len(time_str) == 5:
+        hour = int(time_str[0])
+        minute = int(time_str[1:3])
+        second = int(time_str[3:5])
+    else:
+        hour = int(time_str[0:2])
+        minute = int(time_str[2:4])
+        second = int(time_str[4:6])
+
+    if minute >= 60 or second >= 60:
+        return None
+
+    return f"{hour:02d}:{minute:02d}:{second:02d}"
+
+
+def parse_compact_time_interval(interval_str: str) -> tuple[str, str] | None:
+    """Parse compact time interval string.
+
+    Example:
+    - 10101-20356 -> (01:01:01, 02:03:56)
+    """
+    parts = interval_str.split("-", 1)
+    if len(parts) != 2:
+        return None
+
+    start = parse_compact_time_format(parts[0].strip())
+    end = parse_compact_time_format(parts[1].strip())
+
+    if not start or not end:
+        return None
+
+    return (start, end)
