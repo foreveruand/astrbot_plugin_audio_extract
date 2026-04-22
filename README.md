@@ -85,6 +85,16 @@ The plugin automatically runs the following scheduled tasks:
 
 ## Changelog
 
+### v1.1.5
+
+- `auex` 进度流程改为单一流式更新：支持消息编辑的平台会在同一条消息中展示最终提取完成列表
+- 移除处理过程中的单文件成功提示，提取完成信息只保留最后的汇总消息
+
+### v1.1.4
+
+- 修复 `auex` 在 Telegram 多选确认后，完成态消息被错误显示为“开始处理”的问题
+- 优化 `auex` 完成输出：按 `[序号/总数] 文件名 ✅ 音频提取完成` 列出完整文件名（不含后缀）
+
 ### v1.1.3
 
 - `vclip` 新增支持紧凑时间区间格式：`HMMSS-HMMSS` / `HHMMSS-HHMMSS`

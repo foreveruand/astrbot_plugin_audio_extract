@@ -560,9 +560,8 @@ class Main(star.Star):
             selected_files = [results[i] for i in sorted(selected)]
             del KEYBOARD_SESSIONS[session_id]
 
-            await event.answer_callback_query(
-                text=f"已选择 {len(selected_files)} 个文件，开始处理..."
-            )
+            # Only acknowledge the click; progress updates will replace the message.
+            await event.answer_callback_query()
 
             # Process audio extraction
             await self._process_audio_extraction(event, selected_files)
@@ -699,42 +698,59 @@ class Main(star.Star):
         self, event: AstrMessageEvent, video_paths: list[str]
     ) -> None:
         """Process audio extraction for multiple video files."""
-        for i, video_path in enumerate(video_paths, 1):
-            video_name = Path(video_path).stem
-            temp_mp3_path = str(self.work_dir / f"{video_name}.mp3")
-            mp3_path = str(self.out_dir / f"{video_name}.mp3")
-            job_file = str(self.work_dir / ".jobs" / f"{Path(video_path).name}.json")
+        completed_items: list[tuple[int, str]] = []
+        failed_items: list[tuple[int, str, str]] = []
 
-            Path(job_file).write_text(
-                json.dumps({"video": video_path, "mp3": mp3_path})
-            )
+        async def progress_stream() -> AsyncGenerator[str, None]:
+            for i, video_path in enumerate(video_paths, 1):
+                video_name = Path(video_path).stem
+                temp_mp3_path = str(self.work_dir / f"{video_name}.mp3")
+                mp3_path = str(self.out_dir / f"{video_name}.mp3")
+                job_file = str(self.work_dir / ".jobs" / f"{Path(video_path).name}.json")
 
-            cmd = build_audio_extract_command(video_path, temp_mp3_path)
+                Path(job_file).write_text(
+                    json.dumps({"video": video_path, "mp3": mp3_path})
+                )
 
-            async def progress_stream() -> AsyncGenerator[str, None]:
-                base_prefix = f"[{i}/{len(video_paths)}] {video_name[:30]}"
+                cmd = build_audio_extract_command(video_path, temp_mp3_path)
+                base_prefix = f"[{i}/{len(video_paths)}] {video_name}"
                 yield f"{base_prefix} 提取中..."
+
                 async for status, msg in ffmpeg_progress_generator(cmd):
                     if status == "progress":
                         yield f"{base_prefix}\n{msg}"
                     elif status == "success":
                         shutil.move(temp_mp3_path, mp3_path)
-                        yield f"{base_prefix} ✅ 音频提取完成"
-                        return
+                        completed_items.append((i, video_name))
+                        break
                     elif status == "failed":
                         Path(job_file).unlink(missing_ok=True)
+                        failed_items.append((i, video_name, f"失败: {msg}"))
                         yield f"{base_prefix} ❌ 失败: {msg}"
-                        return
+                        break
                     elif status == "exception":
                         Path(job_file).unlink(missing_ok=True)
+                        failed_items.append((i, video_name, f"出错: {msg}"))
                         yield f"{base_prefix} ❌ 出错: {msg}"
-                        return
+                        break
 
-            await self._send_stream_updates(event, progress_stream)
+            summary_lines = [
+                f"[{idx}/{len(video_paths)}] {name} ✅ 音频提取完成"
+                for idx, name in completed_items
+            ]
+            summary_lines.extend(
+                [
+                    f"[{idx}/{len(video_paths)}] {name} ❌ {reason}"
+                    for idx, name, reason in failed_items
+                ]
+            )
 
-        await event.send(
-            event.plain_result(f"✅ 全部完成! 共处理 {len(video_paths)} 个文件")
-        )
+            if summary_lines:
+                yield "\n".join(summary_lines)
+            else:
+                yield "❌ 未成功提取任何文件"
+
+        await self._send_stream_updates(event, progress_stream)
 
     @filter.command("vclip")
     async def vclip(self, event: AstrMessageEvent):
