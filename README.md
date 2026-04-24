@@ -37,11 +37,12 @@ A media processing plugin for AstrBot that supports audio extraction from video 
 /auex <keyword>
 ```
 
-Search for video files matching the keyword and extract audio as MP3.
+Search for video files matching the keyword and extract audio as MP3. Multiple keywords can be separated by Chinese or English commas, and merged search results show the first 20 files for selection.
 
 **Example:**
 ```
 /auex movie_name
+/auex movie_name,episode_name
 ```
 
 ### Video Clipping
@@ -84,6 +85,11 @@ The plugin automatically runs the following scheduled tasks:
 - FLAC (with LRC conversion)
 
 ## Changelog
+
+### v1.1.6
+
+- `auex` supports multiple search keywords separated by Chinese or English commas
+- Merged `auex` search results now show the first 20 files for selection
 
 ### v1.1.5
 

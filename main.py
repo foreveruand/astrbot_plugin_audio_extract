@@ -41,6 +41,7 @@ from .file_selector import FileSelector, LocalIndexDB
 logger = logging.getLogger("astrbot")
 
 SESSION_TIMEOUT = 300
+AUEX_RESULT_LIMIT = 20
 
 # Store inline keyboard session state for Telegram platform
 KEYBOARD_SESSIONS: dict[str, dict] = {}
@@ -405,14 +406,44 @@ class Main(star.Star):
         """Called when the plugin is disabled or reloaded."""
         logger.info("Audio Extract plugin terminated")
 
+    def _split_search_keywords(self, keyword: str) -> list[str]:
+        """Split search keywords by Chinese or English commas."""
+        keywords = []
+        seen = set()
+        for item in keyword.replace("，", ",").split(","):
+            normalized = item.strip()
+            if not normalized or normalized in seen:
+                continue
+            keywords.append(normalized)
+            seen.add(normalized)
+        return keywords
+
+    async def _search_auex_files(
+        self, selector: FileSelector, keywords: list[str]
+    ) -> list[str]:
+        """Search all keywords and merge unique results in keyword order."""
+        results = []
+        seen = set()
+        for keyword in keywords:
+            keyword_results = await selector.search_files(
+                keyword, limit=AUEX_RESULT_LIMIT
+            )
+            for path in keyword_results:
+                if path in seen:
+                    continue
+                results.append(path)
+                seen.add(path)
+
+        return results[:AUEX_RESULT_LIMIT]
+
     def _build_file_list_message(self, results: list[str], keyword: str) -> str:
         """Build the file selection message."""
         lines = [f"🔍 找到 {len(results)} 个匹配「{keyword}」的文件：", ""]
-        for i, path in enumerate(results[:15], 1):
+        for i, path in enumerate(results[:AUEX_RESULT_LIMIT], 1):
             name = Path(path).name
             lines.append(f"{i}. {name}")
-        if len(results) > 15:
-            lines.append(f"... 还有 {len(results) - 15} 个文件")
+        if len(results) > AUEX_RESULT_LIMIT:
+            lines.append(f"... 还有 {len(results) - AUEX_RESULT_LIMIT} 个文件")
 
         lines.append("")
         lines.append("请回复要处理的文件序号（逗号分隔）")
@@ -435,7 +466,7 @@ class Main(star.Star):
         reply = reply.strip().lower()
 
         if reply in ("全部", "all", "全选"):
-            return list(range(min(max_count, 15)))
+            return list(range(min(max_count, AUEX_RESULT_LIMIT)))
 
         indices = set()
         parts = reply.replace("，", ",").split(",")
@@ -599,7 +630,7 @@ class Main(star.Star):
             await event.answer_callback_query(text="无效操作")
 
     @filter.command("auex")
-    async def auex(self, event: AstrMessageEvent):
+    async def auex(self, event: AstrMessageEvent, keyword: str):
         """Extract audio from video files.
 
         Usage:
@@ -607,20 +638,20 @@ class Main(star.Star):
         """
         await self.initialize()
 
-        message = event.message_str.strip()
-        keyword = message.replace("auex", "", 1).strip()
-
-        if not keyword:
+        keyword = keyword.strip()
+        keywords = self._split_search_keywords(keyword)
+        if not keywords:
             yield event.plain_result(
-                "用法: /auex <关键词>\n搜索匹配关键词的视频文件并提取音频为 MP3 格式。"
+                "用法: /auex <关键词>\n多个关键词可用中文或英文逗号分隔。"
             )
             return
+        keyword_label = "、".join(keywords)
 
         selector = FileSelector(self.config)
-        results = await selector.search_files(keyword, limit=15)
+        results = await self._search_auex_files(selector, keywords)
 
         if not results:
-            yield event.plain_result(f"未找到匹配「{keyword}」的文件")
+            yield event.plain_result(f"未找到匹配「{keyword_label}」的文件")
             return
 
         # Single file - process directly
@@ -638,10 +669,10 @@ class Main(star.Star):
             KEYBOARD_SESSIONS[session_id] = {
                 "results": results,
                 "selected": set(),
-                "keyword": keyword,
+                "keyword": keyword_label,
             }
 
-            msg = f"🔍 找到 {len(results)} 个匹配「{keyword}」的文件"
+            msg = f"🔍 找到 {len(results)} 个匹配「{keyword_label}」的文件"
             result = MessageEventResult()
             result.message(msg)
             result.inline_keyboard(
@@ -651,7 +682,7 @@ class Main(star.Star):
             return
 
         # Non-Telegram platforms: use text selection
-        msg = self._build_file_list_message(results, keyword)
+        msg = self._build_file_list_message(results, keyword_label)
         yield event.plain_result(msg)
 
         @session_waiter(timeout=SESSION_TIMEOUT)
@@ -706,7 +737,9 @@ class Main(star.Star):
                 video_name = Path(video_path).stem
                 temp_mp3_path = str(self.work_dir / f"{video_name}.mp3")
                 mp3_path = str(self.out_dir / f"{video_name}.mp3")
-                job_file = str(self.work_dir / ".jobs" / f"{Path(video_path).name}.json")
+                job_file = str(
+                    self.work_dir / ".jobs" / f"{Path(video_path).name}.json"
+                )
 
                 Path(job_file).write_text(
                     json.dumps({"video": video_path, "mp3": mp3_path})

@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.1.6
+
+- Added multi-keyword search for `auex` using Chinese or English comma separators.
+- Merged `auex` search results are deduplicated and limited to the first 20 files for selection.
+
 ## v1.1.5
 
 - Changed `auex` extraction progress to use a single stream update flow, so platforms supporting message editing now present the final completion list by editing the same progress message.
