@@ -42,6 +42,22 @@ logger = logging.getLogger("astrbot")
 
 SESSION_TIMEOUT = 300
 AUEX_RESULT_LIMIT = 20
+AUEX_BATCH_DISPLAY_LIMIT = 50
+MEDIA_EXTENSIONS = {
+    ".mp4",
+    ".mkv",
+    ".mov",
+    ".wmv",
+    ".flv",
+    ".webm",
+    ".ts",
+    ".avi",
+    ".wav",
+    ".mp3",
+    ".flac",
+    ".aac",
+}
+SUBTITLE_EXTENSIONS = {".srt", ".ass", ".ssa", ".vtt", ".lrc"}
 
 # Store inline keyboard session state for Telegram platform
 KEYBOARD_SESSIONS: dict[str, dict] = {}
@@ -497,6 +513,96 @@ class Main(star.Star):
 
         return sorted(indices) if indices else None
 
+    def _is_media_file(self, path: Path) -> bool:
+        """Return whether a path is a supported media file."""
+        return path.is_file() and path.suffix.lower() in MEDIA_EXTENSIONS
+
+    def _is_subtitle_or_lyrics_file(self, path: Path) -> bool:
+        """Return whether a path is a subtitle or lyrics sidecar file."""
+        return path.is_file() and path.suffix.lower() in SUBTITLE_EXTENSIONS
+
+    def _has_subtitle_or_lyrics_sidecar(self, media_path: Path) -> bool:
+        """Check same-directory sidecars that appear to belong to the media file."""
+        try:
+            siblings = media_path.parent.iterdir()
+        except OSError as exc:
+            logger.warning(f"Failed to scan sidecars in {media_path.parent}: {exc}")
+            return False
+
+        media_stem = media_path.stem
+        for sibling in siblings:
+            if not self._is_subtitle_or_lyrics_file(sibling):
+                continue
+            subtitle_stem = sibling.stem
+            if subtitle_stem == media_stem:
+                return True
+            if subtitle_stem.startswith(
+                (f"{media_stem}.", f"{media_stem}_", f"{media_stem}-")
+            ):
+                return True
+        return False
+
+    def _scan_no_subtitle_files(self, scan_dir: Path) -> list[str]:
+        """Find media files that do not have subtitle or lyrics sidecars."""
+        results: list[str] = []
+        for path in scan_dir.rglob("*"):
+            if not self._is_media_file(path):
+                continue
+            if self._has_subtitle_or_lyrics_sidecar(path):
+                continue
+            results.append(str(path.resolve()))
+        return sorted(results, key=str.lower)
+
+    def _build_batch_review_message(self, paths: list[str]) -> str:
+        """Build the batch review message for no-subtitle files."""
+        lines = [f"找到 {len(paths)} 个无字幕/歌词媒体文件：", ""]
+        for idx, path in enumerate(paths[:AUEX_BATCH_DISPLAY_LIMIT], 1):
+            lines.append(f"{idx}. {Path(path).name}")
+        if len(paths) > AUEX_BATCH_DISPLAY_LIMIT:
+            lines.append(f"... 还有 {len(paths) - AUEX_BATCH_DISPLAY_LIMIT} 个文件")
+
+        lines.extend(
+            [
+                "",
+                "回复：",
+                "确认 - 开始批量提取音频并写入任务信息",
+                "删除 1,3,5 或 删除 1-5 - 从列表移除",
+                "添加 /path/to/file.mp4 - 添加文件",
+                "列表 - 重新显示当前列表",
+                "取消 - 退出",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _parse_batch_add_path(self, reply_text: str) -> Path | None:
+        """Parse an add command and return the requested path."""
+        normalized = reply_text.strip()
+        for prefix in ("添加", "add"):
+            if normalized.lower().startswith(prefix):
+                candidate = normalized[len(prefix) :].strip()
+                if candidate:
+                    return Path(candidate).expanduser()
+        return None
+
+    def _parse_batch_remove_selection(
+        self, reply_text: str, max_count: int
+    ) -> list[int] | None:
+        """Parse remove command selection."""
+        normalized = reply_text.strip()
+        lowered = normalized.lower()
+        for prefix in ("删除", "移除", "remove", "delete", "del"):
+            if lowered.startswith(prefix):
+                selection_text = normalized[len(prefix) :].strip()
+                if not selection_text:
+                    return None
+                return self._parse_selection(selection_text, max_count)
+        return None
+
+    @filter.command_group("auex")
+    def auex(self) -> None:
+        """Audio extraction command group."""
+        pass
+
     def _build_inline_keyboard(
         self, session_id: str, results: list[str], selected: set[int]
     ) -> list[list[dict]]:
@@ -629,12 +735,12 @@ class Main(star.Star):
         except ValueError:
             await event.answer_callback_query(text="无效操作")
 
-    @filter.command("auex")
-    async def auex(self, event: AstrMessageEvent, keyword: str):
+    @auex.command("search")
+    async def auex_search(self, event: AstrMessageEvent, keyword: str):
         """Extract audio from video files.
 
         Usage:
-            /auex <keyword> - Search and extract audio from video files matching keyword
+            /auex search <keyword> - Search and extract audio from video files matching keyword
         """
         await self.initialize()
 
@@ -642,7 +748,7 @@ class Main(star.Star):
         keywords = self._split_search_keywords(keyword)
         if not keywords:
             yield event.plain_result(
-                "用法: /auex <关键词>\n多个关键词可用中文或英文逗号分隔。"
+                "用法: /auex search <关键词>\n多个关键词可用中文或英文逗号分隔。"
             )
             return
         keyword_label = "、".join(keywords)
@@ -725,11 +831,123 @@ class Main(star.Star):
         except TimeoutError:
             yield event.plain_result("⏰ 等待超时，操作已取消。")
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @auex.command("batch")
+    async def auex_batch(self, event: AstrMessageEvent, path_str: str):
+        """Batch extract audio for media files without subtitle/lyrics sidecars.
+
+        Usage:
+            /auex batch <path> - search video or audio file without sub in path
+        """
+        await self.initialize()
+
+        scan_dir = Path(path_str.strip()).expanduser()
+        if not scan_dir.is_absolute():
+            scan_dir = scan_dir.resolve()
+        if not scan_dir.is_dir():
+            yield event.plain_result(f"目录不存在或不可访问: {scan_dir}")
+            return
+
+        yield event.plain_result(f"开始扫描: {scan_dir}")
+        paths = self._scan_no_subtitle_files(scan_dir)
+        if not paths:
+            yield event.plain_result("未找到无字幕/歌词媒体文件。")
+            return
+
+        await event.send(event.plain_result(self._build_batch_review_message(paths)))
+
+        @session_waiter(timeout=SESSION_TIMEOUT)
+        async def wait_for_batch_review(
+            controller: SessionController, reply_event: AstrMessageEvent
+        ) -> None:
+            reply_text = reply_event.message_str.strip()
+            normalized = reply_text.lower()
+
+            if normalized in ("取消", "cancel", "退出", "exit"):
+                await reply_event.send(reply_event.plain_result("已取消操作。"))
+                controller.stop()
+                return
+
+            if normalized in ("列表", "list", "ls"):
+                await reply_event.send(
+                    reply_event.plain_result(self._build_batch_review_message(paths))
+                )
+                return
+
+            add_path = self._parse_batch_add_path(reply_text)
+            if add_path is not None:
+                if not add_path.is_absolute():
+                    add_path = add_path.resolve()
+                if not self._is_media_file(add_path):
+                    await reply_event.send(
+                        reply_event.plain_result(
+                            f"无法添加，文件不存在或格式不支持: {add_path}"
+                        )
+                    )
+                    return
+                resolved = str(add_path.resolve())
+                if resolved not in paths:
+                    paths.append(resolved)
+                    paths.sort(key=str.lower)
+                await reply_event.send(
+                    reply_event.plain_result(
+                        f"已添加，当前共 {len(paths)} 个文件。\n"
+                        "回复「确认」开始处理，或「列表」查看。"
+                    )
+                )
+                return
+
+            remove_indices = self._parse_batch_remove_selection(reply_text, len(paths))
+            if remove_indices is not None:
+                for idx in sorted(remove_indices, reverse=True):
+                    paths.pop(idx)
+                await reply_event.send(
+                    reply_event.plain_result(
+                        f"已删除 {len(remove_indices)} 个条目，当前剩余 {len(paths)} 个文件。\n"
+                        "回复「确认」开始处理，或「列表」查看。"
+                    )
+                )
+                if not paths:
+                    await reply_event.send(
+                        reply_event.plain_result("列表为空，操作结束。")
+                    )
+                    controller.stop()
+                return
+
+            if normalized in ("确认", "confirm", "ok", "yes", "y"):
+                if not paths:
+                    await reply_event.send(
+                        reply_event.plain_result("列表为空，无法处理。")
+                    )
+                    controller.stop()
+                    return
+                selected_files = list(paths)
+                await reply_event.send(
+                    reply_event.plain_result(
+                        f"已确认 {len(selected_files)} 个文件，开始批量处理..."
+                    )
+                )
+                await self._process_audio_extraction(reply_event, selected_files)
+                controller.stop()
+                return
+
+            await reply_event.send(
+                reply_event.plain_result(
+                    "无效输入。请回复「确认」「删除 1,3」「添加 /path/to/file」「列表」或「取消」。"
+                )
+            )
+
+        try:
+            await wait_for_batch_review(event)
+        except TimeoutError:
+            yield event.plain_result("⏰ 等待超时，操作已取消。")
+
     async def _process_audio_extraction(
         self, event: AstrMessageEvent, video_paths: list[str]
     ) -> None:
         """Process audio extraction for multiple video files."""
         completed_items: list[tuple[int, str]] = []
+        skipped_items: list[tuple[int, str]] = []
         failed_items: list[tuple[int, str, str]] = []
 
         async def progress_stream() -> AsyncGenerator[str, None]:
@@ -740,13 +958,18 @@ class Main(star.Star):
                 job_file = str(
                     self.work_dir / ".jobs" / f"{Path(video_path).name}.json"
                 )
+                base_prefix = f"[{i}/{len(video_paths)}] {video_name}"
+
+                if Path(job_file).exists():
+                    skipped_items.append((i, video_name))
+                    yield f"{base_prefix} ⏭️ 已存在任务，跳过提取"
+                    continue
 
                 Path(job_file).write_text(
                     json.dumps({"video": video_path, "mp3": mp3_path})
                 )
 
                 cmd = build_audio_extract_command(video_path, temp_mp3_path)
-                base_prefix = f"[{i}/{len(video_paths)}] {video_name}"
                 yield f"{base_prefix} 提取中..."
 
                 async for status, msg in ffmpeg_progress_generator(cmd):
@@ -771,6 +994,12 @@ class Main(star.Star):
                 f"[{idx}/{len(video_paths)}] {name} ✅ 音频提取完成"
                 for idx, name in completed_items
             ]
+            summary_lines.extend(
+                [
+                    f"[{idx}/{len(video_paths)}] {name} ⏭️ 已存在任务，跳过"
+                    for idx, name in skipped_items
+                ]
+            )
             summary_lines.extend(
                 [
                     f"[{idx}/{len(video_paths)}] {name} ❌ {reason}"

@@ -34,15 +34,19 @@ A media processing plugin for AstrBot that supports audio extraction from video 
 ### Audio Extraction
 
 ```
-/auex <keyword>
+/auex search <keyword>
+/auex batch <directory>
 ```
 
-Search for video files matching the keyword and extract audio as MP3. Multiple keywords can be separated by Chinese or English commas, and merged search results show the first 20 files for selection.
+`/auex search` searches for video files matching the keyword and extracts audio as MP3. Multiple keywords can be separated by Chinese or English commas, and merged search results show the first 20 files for selection.
+
+`/auex batch` is admin-only. It scans a directory recursively for media files without subtitle or lyrics sidecars. After the review message, you can confirm the full list, remove entries by index, add explicit file paths, or cancel. Confirmed files are extracted with the same FFmpeg settings as `auex search`, and job files are written to the plugin work directory for scheduled subtitle sync.
 
 **Example:**
 ```
-/auex movie_name
-/auex movie_name,episode_name
+/auex search movie_name
+/auex search movie_name,episode_name
+/auex batch /path/to/media
 ```
 
 ### Video Clipping
@@ -85,6 +89,12 @@ The plugin automatically runs the following scheduled tasks:
 - FLAC (with LRC conversion)
 
 ## Changelog
+
+### v1.1.7
+
+- `auex` is now a command group.
+- Existing keyword extraction moved to `/auex search <keyword>`.
+- Added admin-only `/auex batch <directory>` to scan no-subtitle/no-lyrics media files, review the list interactively, then batch extract audio and write plugin job files.
 
 ### v1.1.6
 

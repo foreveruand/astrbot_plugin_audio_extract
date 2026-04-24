@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.1.7
+
+- Converted `auex` into a command group.
+- Moved the existing keyword extraction flow to `/auex search <keyword>`.
+- Added admin-only `/auex batch <directory>` for recursive no-subtitle/no-lyrics media scans, interactive list review, batch audio extraction, and plugin-compatible job file creation.
+
 ## v1.1.6
 
 - Added multi-keyword search for `auex` using Chinese or English comma separators.
