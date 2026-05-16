@@ -927,8 +927,10 @@ class Main(star.Star):
                         f"已确认 {len(selected_files)} 个文件，开始批量处理..."
                     )
                 )
-                await self._process_audio_extraction(reply_event, selected_files)
+                # End the interactive review session before starting the long-running
+                # extraction task, otherwise the waiter can still hit its timeout.
                 controller.stop()
+                await self._process_audio_extraction(reply_event, selected_files)
                 return
 
             await reply_event.send(
