@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .database import LocalIndex
+from .database import LocalIndex, normalize_index_extensions
 
 if TYPE_CHECKING:
     from astrbot.api import AstrBotConfig
@@ -20,13 +20,18 @@ _index_lock = asyncio.Lock()
 _index_building: set[str] = set()
 
 
-async def request_rebuild_async(base_dir: str, force_full: bool = False):
+async def request_rebuild_async(
+    base_dir: str,
+    force_full: bool = False,
+    index_extensions: list[str] | None = None,
+):
     """
     Asynchronously request index rebuild (prevent duplicate builds).
 
     Args:
         base_dir: Base directory
         force_full: Whether to force full rebuild
+        index_extensions: File extensions to keep in the index
     """
     async with _index_lock:
         if base_dir in _index_building:
@@ -40,11 +45,11 @@ async def request_rebuild_async(base_dir: str, force_full: bool = False):
         try:
             if force_full:
                 await loop.run_in_executor(
-                    None, LocalIndexDB.rebuild_index_full, base_dir
+                    None, LocalIndexDB.rebuild_index_full, base_dir, index_extensions
                 )
             else:
                 await loop.run_in_executor(
-                    None, LocalIndexDB.build_index, base_dir, True
+                    None, LocalIndexDB.build_index, base_dir, True, index_extensions
                 )
         finally:
             async with _index_lock:
@@ -53,9 +58,19 @@ async def request_rebuild_async(base_dir: str, force_full: bool = False):
     asyncio.create_task(runner())
 
 
-async def search_files_async(keyword: str, is_dir=False, limit=10) -> list[str] | None:
+async def search_files_async(
+    keyword: str,
+    is_dir: bool = False,
+    limit: int = 10,
+    index_extensions: list[str] | None = None,
+) -> list[str] | None:
     """Async search for files, trigger index rebuild if no results."""
-    results = LocalIndexDB.search_index(keyword, is_dir=is_dir, limit=limit)
+    results = LocalIndexDB.search_index(
+        keyword,
+        is_dir=is_dir,
+        limit=limit,
+        index_extensions=index_extensions,
+    )
 
     # If no results, return None to indicate rebuild needed
     if not results:
@@ -69,6 +84,9 @@ class FileSelector:
 
     def __init__(self, config: "AstrBotConfig"):
         self.config = config
+        self.index_extensions = normalize_index_extensions(
+            self.config.get("index_extensions")
+        )
 
     async def search_files(self, keyword: str, limit: int = 15) -> list[str]:
         """
@@ -81,7 +99,12 @@ class FileSelector:
         Returns:
             List of file paths matching the keyword
         """
-        results = await search_files_async(keyword, limit=limit)
+        if not self.index_extensions:
+            return []
+
+        results = await search_files_async(
+            keyword, limit=limit, index_extensions=self.index_extensions
+        )
 
         if results is None:
             paths = []
@@ -97,7 +120,11 @@ class FileSelector:
 
             for dir_path in dirs:
                 paths.extend(
-                    LocalIndexDB.list_video_files_recursive(dir_path, limit=limit)
+                    LocalIndexDB.list_video_files_recursive(
+                        dir_path,
+                        limit=limit,
+                        index_extensions=self.index_extensions,
+                    )
                 )
             if len(paths) > 1:
                 return paths
@@ -108,15 +135,19 @@ class FileSelector:
             scan_dirs = self.config.get("scan_dirs", [])
 
             for scan_dir in scan_dirs:
-                await request_rebuild_async(scan_dir)
+                await request_rebuild_async(
+                    scan_dir, index_extensions=self.index_extensions
+                )
 
             # Wait for index to complete (max 30 seconds)
             for _ in range(30):
                 await asyncio.sleep(1)
-                results = await search_files_async(keyword, limit=limit)
+                results = await search_files_async(
+                    keyword, limit=limit, index_extensions=self.index_extensions
+                )
                 if results is not None:
                     break
-        return results
+        return results or []
 
     def build_file_list_message(self, paths: list[str], extra_info: str = "") -> str:
         """Build file list message."""

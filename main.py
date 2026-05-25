@@ -28,6 +28,7 @@ from astrbot.core.platform.sources.telegram.tg_event import (
 )
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
+from .database import normalize_index_extensions
 from .ffmpeg_utils import (
     build_audio_extract_command,
     build_video_clip_command,
@@ -268,6 +269,14 @@ class Main(star.Star):
 
         logger.info(f"Work directory: {self.work_dir}")
         logger.info(f"Output directory: {self.out_dir}")
+        logger.info(
+            "Index extensions: %s",
+            ", ".join(self._get_index_extensions()) or "(none)",
+        )
+
+    def _get_index_extensions(self) -> list[str]:
+        """Return normalized file extensions used by the file index."""
+        return normalize_index_extensions(self.config.get("index_extensions"))
 
     async def _init_scheduled_jobs(self) -> None:
         """Initialize scheduled jobs for subtitle sync and index refresh."""
@@ -368,16 +377,22 @@ class Main(star.Star):
         """Scheduled task: Incremental refresh of file index."""
         logger.info("Starting incremental file index refresh...")
         scan_dirs = self.config.get("scan_dirs", [])
+        index_extensions = self._get_index_extensions()
         for scan_dir in scan_dirs:
-            LocalIndexDB.build_index(scan_dir, incremental=True)
+            LocalIndexDB.build_index(
+                scan_dir,
+                incremental=True,
+                index_extensions=index_extensions,
+            )
         logger.info("File index refresh complete")
 
     async def _full_rebuild_job(self) -> None:
         """Scheduled task: Full rebuild of file index."""
         logger.info("Starting full rebuild of file index...")
         scan_dirs = self.config.get("scan_dirs", [])
+        index_extensions = self._get_index_extensions()
         for scan_dir in scan_dirs:
-            LocalIndexDB.rebuild_index_full(scan_dir)
+            LocalIndexDB.rebuild_index_full(scan_dir, index_extensions=index_extensions)
         logger.info("File index full rebuild complete")
 
     def _convert_vtt_to_lrc(self, vtt_path: str, lrc_path: str) -> None:
@@ -1195,8 +1210,9 @@ class Main(star.Star):
             await event.send(event.plain_result("未配置扫描目录。"))
             return
 
+        index_extensions = self._get_index_extensions()
         for scan_dir in scan_dirs:
-            LocalIndexDB.rebuild_index_full(scan_dir)
+            LocalIndexDB.rebuild_index_full(scan_dir, index_extensions=index_extensions)
 
         await event.send(
             event.plain_result(f"✅ 文件索引重建完成，共 {len(scan_dirs)} 个目录。")

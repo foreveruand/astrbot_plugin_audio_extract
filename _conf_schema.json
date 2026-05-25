@@ -12,5 +12,23 @@
       "type": "string"
     },
     "hint": "例如: [\"/path/to/videos\", \"/path/to/media\"]"
+  },
+  "index_extensions": {
+    "type": "list",
+    "default": [
+      ".mp4",
+      ".mkv",
+      ".mov",
+      ".wmv",
+      ".flv",
+      ".webm",
+      ".ts",
+      ".flac"
+    ],
+    "description": "建立文件索引时允许匹配的文件扩展名白名单",
+    "items": {
+      "type": "string"
+    },
+    "hint": "例如: [\".mp4\", \".mkv\", \"flac\"]；留空时不会索引任何文件"
   }
 }

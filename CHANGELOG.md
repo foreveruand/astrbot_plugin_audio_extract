@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.1.8
+
+- Added configurable `index_extensions` so directory indexing only includes the configured file extension whitelist.
+- Updated index rebuild and search flows to clean up stale entries when the whitelist changes.
+
 ## v1.1.7
 
 - Converted `auex` into a command group.

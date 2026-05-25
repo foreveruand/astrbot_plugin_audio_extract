@@ -4,12 +4,55 @@ import logging
 import os
 import sqlite3
 import time
+from pathlib import Path
 
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
 logger = logging.getLogger("astrbot")
 
-VIDEO_EXTS = ["mp4", "mkv", "mov", "wmv", "flv", "webm", "ts", "flac"]
+DEFAULT_INDEX_EXTENSIONS = [
+    ".mp4",
+    ".mkv",
+    ".mov",
+    ".wmv",
+    ".flv",
+    ".webm",
+    ".ts",
+    ".flac",
+]
+
+
+def normalize_index_extensions(extensions) -> list[str]:
+    """Normalize configured index extensions to lowercase values with leading dots."""
+    if extensions is None:
+        candidates = DEFAULT_INDEX_EXTENSIONS
+    elif isinstance(extensions, str):
+        candidates = extensions.replace("，", ",").split(",")
+    elif isinstance(extensions, (list, tuple, set)):
+        candidates = list(extensions)
+    else:
+        logger.warning(
+            "Invalid index_extensions config type %s, falling back to defaults",
+            type(extensions).__name__,
+        )
+        candidates = DEFAULT_INDEX_EXTENSIONS
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        if not isinstance(item, str):
+            continue
+        ext = item.strip().lower()
+        if not ext:
+            continue
+        if not ext.startswith("."):
+            ext = f".{ext}"
+        if ext in seen:
+            continue
+        seen.add(ext)
+        normalized.append(ext)
+
+    return normalized
 
 
 class LocalIndex:
@@ -26,6 +69,19 @@ class LocalIndex:
 
     def _get_conn(self):
         return sqlite3.connect(self.db_path)
+
+    def _normalize_base_dir(self, base_dir: str) -> str:
+        """Normalize base directory for index metadata and cleanup queries."""
+        normalized = str(Path(base_dir).expanduser().resolve())
+        if normalized != os.sep:
+            normalized = normalized.rstrip(os.sep)
+        return normalized
+
+    def _get_scope_query_params(self, base_dir: str) -> tuple[str, str]:
+        """Return exact and prefix match parameters for a directory scope."""
+        normalized = self._normalize_base_dir(base_dir)
+        prefix = normalized if normalized.endswith(os.sep) else normalized + os.sep
+        return normalized, prefix + "%"
 
     def create_tables(self):
         """Create database tables."""
@@ -57,24 +113,35 @@ class LocalIndex:
         conn.commit()
         conn.close()
 
-    def build_index(self, base_dir: str, incremental: bool = True):
+    def build_index(
+        self,
+        base_dir: str,
+        incremental: bool = True,
+        index_extensions: list[str] | None = None,
+    ):
         """
         Build file index.
 
         Args:
             base_dir: Base directory to scan
             incremental: Whether to do incremental update (True=only update changed files, False=full rebuild)
+            index_extensions: File extensions to keep in the index
         """
         conn = self._get_conn()
         cursor = conn.cursor()
 
-        base_dir = os.path.abspath(base_dir)
+        base_dir = self._normalize_base_dir(base_dir)
+        normalized_extensions = normalize_index_extensions(index_extensions)
         now = int(time.time())
         batch = []
-        scanned_paths = set()
+        scanned_paths: set[str] = set()
 
         logger.info(
             f"Starting {'incremental' if incremental else 'full'} scan of: {base_dir}"
+        )
+        logger.info(
+            "Indexing file extensions: %s",
+            ", ".join(normalized_extensions) if normalized_extensions else "(none)",
         )
         start_time = time.time()
 
@@ -109,7 +176,11 @@ class LocalIndex:
 
                 # Add files
                 for f in files:
-                    p = os.path.join(root, f)
+                    file_path = Path(root, f)
+                    if file_path.suffix.lower() not in normalized_extensions:
+                        continue
+
+                    p = str(file_path)
                     scanned_paths.add(p)
 
                     if incremental:
@@ -139,9 +210,9 @@ class LocalIndex:
                 cursor.executemany("REPLACE INTO files VALUES (?, ?, ?, ?)", batch)
                 conn.commit()
 
-            # Delete non-existent files
-            logger.info("Cleaning up deleted files...")
-            self._cleanup_deleted_files(cursor, base_dir, scanned_paths)
+            # Delete stale files that are no longer included in the scoped scan
+            logger.info("Cleaning up stale file index entries...")
+            self._cleanup_stale_entries(cursor, base_dir, scanned_paths)
             conn.commit()
 
             # Update metadata
@@ -163,33 +234,37 @@ class LocalIndex:
         finally:
             conn.close()
 
-    def _cleanup_deleted_files(self, cursor, base_dir: str, scanned_paths: set):
+    def _cleanup_stale_entries(
+        self, cursor, base_dir: str, scanned_paths: set[str]
+    ) -> None:
         """
-        Delete database records for files that no longer exist.
+        Delete database records no longer covered by the current scan.
 
         Args:
             cursor: Database cursor
             base_dir: Base directory
             scanned_paths: Set of all paths scanned this time
         """
-        # Query all files in this directory from database
-        cursor.execute("SELECT path FROM files WHERE path LIKE ?", (base_dir + "%",))
+        scope_base_dir, scope_prefix = self._get_scope_query_params(base_dir)
+        cursor.execute(
+            "SELECT path FROM files WHERE path = ? OR path LIKE ?",
+            (scope_base_dir, scope_prefix),
+        )
         db_paths = [row[0] for row in cursor.fetchall()]
 
         # Find paths to delete
-        to_delete = []
-        for db_path in db_paths:
-            if db_path not in scanned_paths:
-                # Confirm file really doesn't exist
-                if not os.path.exists(db_path):
-                    to_delete.append((db_path,))
+        to_delete = [(db_path,) for db_path in db_paths if db_path not in scanned_paths]
 
         if to_delete:
-            logger.info(f"Deleting {len(to_delete)} non-existent file records")
+            logger.info(f"Deleting {len(to_delete)} stale file records")
             cursor.executemany("DELETE FROM files WHERE path = ?", to_delete)
 
     def search_index(
-        self, keyword: str, is_dir: bool = False, limit: int = 10
+        self,
+        keyword: str,
+        is_dir: bool = False,
+        limit: int = 10,
+        index_extensions: list[str] | None = None,
     ) -> list[str]:
         """
         Search for files or directories.
@@ -198,8 +273,10 @@ class LocalIndex:
             keyword: Search keyword
             is_dir: Whether to search only directories
             limit: Maximum number of results
+            index_extensions: File extensions allowed in file results
         """
         paths: list[str] = []
+        normalized_extensions = normalize_index_extensions(index_extensions)
 
         with self._get_conn() as conn:
             cursor = conn.cursor()
@@ -212,10 +289,13 @@ class LocalIndex:
                 paths.extend([r[0] for r in rows])
                 return paths
 
-            # Search files, only match VIDEO_EXTS
-            for ext in VIDEO_EXTS:
+            if not normalized_extensions:
+                return []
+
+            # Search files, only match configured extensions
+            for ext in normalized_extensions:
                 sql = "SELECT path FROM files WHERE is_dir=0 AND LOWER(name) GLOB ? LIMIT ?"
-                cursor.execute(sql, (f"*{keyword.lower()}*.{ext}", limit))
+                cursor.execute(sql, (f"*{keyword.lower()}*{ext}", limit))
                 rows = cursor.fetchall()
                 paths.extend([r[0] for r in rows])
                 if len(paths) >= limit:
@@ -223,14 +303,24 @@ class LocalIndex:
 
         return paths[:limit]
 
-    def list_video_files_recursive(self, dir_path: str, limit: int = 50) -> list[str]:
+    def list_video_files_recursive(
+        self,
+        dir_path: str,
+        limit: int = 50,
+        index_extensions: list[str] | None = None,
+    ) -> list[str]:
         """
         Return video file paths in specified directory and subdirectories.
 
         Args:
             dir_path: Directory path
             limit: Maximum number of results
+            index_extensions: File extensions allowed in file results
         """
+        normalized_extensions = normalize_index_extensions(index_extensions)
+        if not normalized_extensions:
+            return []
+
         paths = []
         with self._get_conn() as conn:
             cursor = conn.cursor()
@@ -238,8 +328,8 @@ class LocalIndex:
             # Ensure path ends with separator
             dir_path = dir_path.rstrip(os.sep) + os.sep
 
-            for ext in VIDEO_EXTS:
-                pattern = f"{dir_path}%.{ext}"
+            for ext in normalized_extensions:
+                pattern = f"{dir_path}%{ext}"
                 cursor.execute(
                     "SELECT path FROM files WHERE is_dir=0 AND LOWER(path) LIKE ? LIMIT ?",
                     (pattern.lower(), limit),
@@ -260,6 +350,7 @@ class LocalIndex:
         """
         with self._get_conn() as conn:
             cursor = conn.cursor()
+            base_dir = self._normalize_base_dir(base_dir)
             cursor.execute(
                 "SELECT last_updated, file_count FROM index_meta WHERE base_dir = ?",
                 (base_dir,),
@@ -270,22 +361,31 @@ class LocalIndex:
                 return {"last_updated": row[0], "file_count": row[1]}
             return {"last_updated": None, "file_count": 0}
 
-    def rebuild_index_full(self, base_dir: str):
+    def rebuild_index_full(
+        self, base_dir: str, index_extensions: list[str] | None = None
+    ):
         """Fully rebuild index (delete old data and rescan)."""
         conn = self._get_conn()
         cursor = conn.cursor()
 
+        base_dir = self._normalize_base_dir(base_dir)
         logger.info(f"Starting full index rebuild: {base_dir}")
 
         try:
             # Delete all old records for this directory
-            cursor.execute("DELETE FROM files WHERE path LIKE ?", (base_dir + "%",))
+            scope_base_dir, scope_prefix = self._get_scope_query_params(base_dir)
+            cursor.execute(
+                "DELETE FROM files WHERE path = ? OR path LIKE ?",
+                (scope_base_dir, scope_prefix),
+            )
             cursor.execute("DELETE FROM index_meta WHERE base_dir = ?", (base_dir,))
             conn.commit()
 
             # Rebuild
             conn.close()
-            self.build_index(base_dir, incremental=False)
+            self.build_index(
+                base_dir, incremental=False, index_extensions=index_extensions
+            )
 
         except Exception as e:
             logger.error(f"Full index rebuild failed: {e}")

@@ -25,9 +25,13 @@ A media processing plugin for AstrBot that supports audio extraction from video 
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `work_dir` | string | `resources/audio_extract` | Working directory for temp files |
-| `out_dir` | string | `/tmp/audio_extract` | Output directory for MP3 and subtitles |
+| `out_dir` | string | `plugin_data/astrbot_plugin_audio_extract/output` | Output directory for MP3 and subtitles |
 | `scan_dirs` | list | `[]` | List of directories to scan for file index |
+| `index_extensions` | list | `[".mp4", ".mkv", ".mov", ".wmv", ".flv", ".webm", ".ts", ".flac"]` | File extension whitelist used when building and searching the file index |
+
+Notes:
+- `index_extensions` accepts values with or without a leading dot, such as `.mp4` or `mp4`.
+- If `index_extensions` is empty, the plugin will not index any files.
 
 ## Commands
 
@@ -85,10 +89,15 @@ The plugin automatically runs the following scheduled tasks:
 
 ## Supported Video Formats
 
-- MP4, MKV, MOV, WMV, FLV, WebM, TS
-- FLAC (with LRC conversion)
+- Indexed formats default to MP4, MKV, MOV, WMV, FLV, WebM, TS, and FLAC.
+- You can change indexed file types with `index_extensions`.
 
 ## Changelog
+
+### v1.1.8
+
+- Added configurable `index_extensions` so directory indexing only includes the configured file extension whitelist.
+- Updated index rebuild and search flows to clean up stale entries when the whitelist changes.
 
 ### v1.1.7
 
