@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.1.9
+
+- Added Telegram inline menu support for `/auex batch` review confirm, refresh, and cancel actions.
+- Added Telegram inline selection and text-reply fallback refresh for `/vclip` multi-file results.
+- Telegram review and selection replies are deleted when possible, and menu/progress messages are reused in place.
+
 ## v1.1.8
 
 - Added configurable `index_extensions` so directory indexing only includes the configured file extension whitelist.

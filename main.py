@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import telegramify_markdown
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from astrbot.api import AstrBotConfig, star
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
@@ -96,6 +97,7 @@ class Main(star.Star):
         text: str,
         *,
         message_id: int | None = None,
+        reply_markup: InlineKeyboardMarkup | None = None,
     ) -> bool:
         """Try to edit a Telegram progress message in place."""
         formatted_text, text_kwargs = self._format_telegram_text(text)
@@ -106,6 +108,7 @@ class Main(star.Star):
                     await event.client.edit_message_text(
                         text=formatted_text,
                         inline_message_id=event.inline_message_id,
+                        reply_markup=reply_markup,
                         **text_kwargs,
                     )
                     return True
@@ -115,6 +118,7 @@ class Main(star.Star):
                         text=formatted_text,
                         chat_id=event.message.chat.id,
                         message_id=message_id or event.message.message_id,
+                        reply_markup=reply_markup,
                         **text_kwargs,
                     )
                     return True
@@ -135,6 +139,7 @@ class Main(star.Star):
                 chat_id=chat_id,
                 message_id=message_id,
                 text=formatted_text,
+                reply_markup=reply_markup,
                 **text_kwargs,
             )
             return True
@@ -182,13 +187,92 @@ class Main(star.Star):
             logger.warning(f"Failed to send Telegram progress message: {exc}")
             return None
 
+    def _telegram_reply_markup(
+        self, keyboard: list[list[dict]]
+    ) -> InlineKeyboardMarkup:
+        """Build Telegram reply markup from AstrBot inline keyboard data.
+
+        Args:
+            keyboard: Inline keyboard rows using AstrBot button dictionaries.
+
+        Returns:
+            Telegram inline keyboard markup.
+        """
+        return InlineKeyboardMarkup(
+            [[InlineKeyboardButton(**button) for button in row] for row in keyboard]
+        )
+
+    async def _send_telegram_menu(
+        self,
+        event: TelegramPlatformEvent,
+        text: str,
+        keyboard: list[list[dict]],
+    ) -> int | None:
+        """Send a Telegram menu message and return its message ID.
+
+        Args:
+            event: Telegram platform event used to resolve chat target.
+            text: Menu text.
+            keyboard: Inline keyboard rows.
+
+        Returns:
+            Sent message ID when Telegram returns one, otherwise None.
+        """
+        formatted_text, text_kwargs = self._format_telegram_text(text)
+        chat_id = (
+            event.message_obj.group_id
+            if event.get_message_type() == MessageType.GROUP_MESSAGE
+            else event.get_sender_id()
+        )
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "text": formatted_text,
+            "reply_markup": self._telegram_reply_markup(keyboard),
+            **text_kwargs,
+        }
+        if isinstance(chat_id, str) and "#" in chat_id:
+            chat_id, message_thread_id = chat_id.split("#", 1)
+            payload["chat_id"] = chat_id
+            payload["message_thread_id"] = int(message_thread_id)
+
+        try:
+            msg = await event.client.send_message(**payload)
+            return msg.message_id
+        except Exception as exc:
+            logger.warning(f"Failed to send Telegram menu message: {exc}")
+            await event.send(event.plain_result(text))
+            return None
+
+    async def _delete_telegram_reply(self, event: AstrMessageEvent) -> None:
+        """Delete a Telegram user reply when the platform permits it.
+
+        Args:
+            event: Incoming message event.
+        """
+        if not isinstance(event, TelegramPlatformEvent):
+            return
+        try:
+            chat_id = (
+                event.message_obj.group_id
+                if event.get_message_type() == MessageType.GROUP_MESSAGE
+                else event.get_sender_id()
+            )
+            if isinstance(chat_id, str) and "#" in chat_id:
+                chat_id, _ = chat_id.split("#", 1)
+            await event.client.delete_message(
+                chat_id=chat_id,
+                message_id=int(event.message_obj.message_id),
+            )
+        except Exception as exc:
+            logger.debug(f"Failed to delete Telegram reply: {exc}")
+
     async def _send_progress_telegram(
         self,
         event: TelegramPlatformEvent | TelegramCallbackQueryEvent,
         stream_factory: Callable[[], AsyncGenerator[str, None]],
     ) -> None:
         """Send progress updates on Telegram using in-place message editing."""
-        message_id: int | None = None
+        message_id: int | None = getattr(event, "_auex_progress_message_id", None)
         last_update_time = 0.0
         throttle_interval = 0.5
         last_text = ""
@@ -654,6 +738,101 @@ class Main(star.Star):
 
         return buttons
 
+    def _build_batch_review_keyboard(self, session_id: str) -> list[list[dict]]:
+        """Build inline keyboard buttons for batch review.
+
+        Args:
+            session_id: Telegram menu session ID.
+
+        Returns:
+            Inline keyboard rows.
+        """
+        return [
+            [
+                {"text": "确认", "callback_data": f"auex:{session_id}:confirm"},
+                {"text": "刷新列表", "callback_data": f"auex:{session_id}:list"},
+                {"text": "取消", "callback_data": f"auex:{session_id}:cancel"},
+            ]
+        ]
+
+    def _build_vclip_message(
+        self, results: list[str], keyword: str, start_time: str, end_time: str
+    ) -> str:
+        """Build the video clip selection message.
+
+        Args:
+            results: Candidate video paths.
+            keyword: Search keyword.
+            start_time: Clip start time.
+            end_time: Clip end time.
+
+        Returns:
+            Selection message text.
+        """
+        msg = self._build_file_list_message(results, keyword)
+        return f"{msg}\n\n⏱ 剪辑时间: {start_time} → {end_time}"
+
+    def _build_vclip_keyboard(
+        self, session_id: str, results: list[str], selected: set[int]
+    ) -> list[list[dict]]:
+        """Build inline keyboard buttons for video clip selection.
+
+        Args:
+            session_id: Telegram menu session ID.
+            results: Candidate video paths.
+            selected: Selected zero-based indices.
+
+        Returns:
+            Inline keyboard rows.
+        """
+        buttons = []
+        for i in range(0, len(results), 3):
+            row = []
+            for idx in range(i, min(i + 3, len(results))):
+                prefix = "✓ " if idx in selected else ""
+                row.append(
+                    {
+                        "text": f"{prefix}{idx + 1}",
+                        "callback_data": f"auex:{session_id}:{idx}",
+                    }
+                )
+            buttons.append(row)
+        buttons.append(
+            [
+                {"text": "全部", "callback_data": f"auex:{session_id}:all"},
+                {"text": "确认", "callback_data": f"auex:{session_id}:confirm"},
+                {"text": "取消", "callback_data": f"auex:{session_id}:cancel"},
+            ]
+        )
+        return buttons
+
+    async def _edit_telegram_menu(
+        self,
+        event: TelegramPlatformEvent | TelegramCallbackQueryEvent,
+        text: str,
+        keyboard: list[list[dict]] | None,
+        *,
+        message_id: int | None = None,
+    ) -> bool:
+        """Edit a Telegram menu message.
+
+        Args:
+            event: Telegram event used for editing.
+            text: New message text.
+            keyboard: Optional inline keyboard rows.
+            message_id: Target message ID for text-reply events.
+
+        Returns:
+            Whether the edit succeeded.
+        """
+        reply_markup = self._telegram_reply_markup(keyboard) if keyboard else None
+        return await self._edit_telegram_message(
+            event,
+            text,
+            message_id=message_id,
+            reply_markup=reply_markup,
+        )
+
     @filter.callback_query()
     async def handle_auex_callback(self, event: TelegramCallbackQueryEvent) -> None:
         """Handle inline keyboard button clicks for auex command."""
@@ -672,6 +851,107 @@ class Main(star.Star):
         session = KEYBOARD_SESSIONS.get(session_id)
         if not session:
             await event.answer_callback_query(text="会话已过期，请重新发送命令")
+            return
+
+        session_type = session.get("type", "search")
+        if session_type == "batch":
+            paths = session["paths"]
+            if action == "cancel":
+                session["closed"] = True
+                session["state"]["closed"] = True
+                if controller := session.get("controller"):
+                    controller.stop()
+                KEYBOARD_SESSIONS.pop(session_id, None)
+                await event.answer_callback_query(text="已取消操作")
+                await self._edit_telegram_menu(event, "已取消操作。", None)
+                return
+            if action == "list":
+                await event.answer_callback_query(text="已刷新列表")
+                await self._edit_telegram_menu(
+                    event,
+                    self._build_batch_review_message(paths),
+                    self._build_batch_review_keyboard(session_id),
+                )
+                return
+            if action == "confirm":
+                if not paths:
+                    await event.answer_callback_query(text="列表为空，无法处理")
+                    return
+                selected_files = list(paths)
+                session["closed"] = True
+                session["state"]["closed"] = True
+                if controller := session.get("controller"):
+                    controller.stop()
+                KEYBOARD_SESSIONS.pop(session_id, None)
+                await event.answer_callback_query()
+                await self._process_audio_extraction(event, selected_files)
+                return
+            await event.answer_callback_query(text="请用文字回复添加或删除条目")
+            return
+
+        if session_type == "vclip":
+            results = session["results"]
+            selected = session["selected"]
+            start_time = session["start_time"]
+            end_time = session["end_time"]
+            keyword = session["keyword"]
+
+            if action == "cancel":
+                session["closed"] = True
+                session["state"]["closed"] = True
+                if controller := session.get("controller"):
+                    controller.stop()
+                KEYBOARD_SESSIONS.pop(session_id, None)
+                await event.answer_callback_query(text="已取消操作")
+                await self._edit_telegram_menu(event, "已取消操作。", None)
+                return
+            if action == "all":
+                selected.clear()
+                selected.update(range(len(results)))
+                session["selected"] = selected
+                await event.answer_callback_query(
+                    text=f"已选择全部 {len(results)} 个文件"
+                )
+                await self._edit_telegram_menu(
+                    event,
+                    self._build_vclip_message(results, keyword, start_time, end_time),
+                    self._build_vclip_keyboard(session_id, results, selected),
+                )
+                return
+            if action == "confirm":
+                if not selected:
+                    await event.answer_callback_query(text="请至少选择一个文件")
+                    return
+                selected_files = [results[i] for i in sorted(selected)]
+                session["closed"] = True
+                session["state"]["closed"] = True
+                if controller := session.get("controller"):
+                    controller.stop()
+                KEYBOARD_SESSIONS.pop(session_id, None)
+                await event.answer_callback_query()
+                await self._process_video_clip(
+                    event, selected_files, start_time, end_time
+                )
+                return
+
+            try:
+                file_idx = int(action)
+                if file_idx in selected:
+                    selected.discard(file_idx)
+                    await event.answer_callback_query(
+                        text=f"已取消选择文件 {file_idx + 1}"
+                    )
+                else:
+                    selected.add(file_idx)
+                    await event.answer_callback_query(text=f"已选择文件 {file_idx + 1}")
+                session["selected"] = selected
+                await self._edit_telegram_menu(
+                    event,
+                    self._build_vclip_message(results, keyword, start_time, end_time),
+                    self._build_vclip_keyboard(session_id, results, selected),
+                )
+            except ValueError:
+                await event.answer_callback_query(text="无效操作")
             return
 
         results = session["results"]
@@ -869,24 +1149,74 @@ class Main(star.Star):
             yield event.plain_result("未找到无字幕/歌词媒体文件。")
             return
 
-        await event.send(event.plain_result(self._build_batch_review_message(paths)))
+        is_telegram = isinstance(event, TelegramPlatformEvent)
+        session_id = uuid.uuid4().hex[:8] if is_telegram else ""
+        session_state = {"closed": False}
+        menu_message_id: int | None = None
+        if is_telegram:
+            menu_message_id = await self._send_telegram_menu(
+                event,
+                self._build_batch_review_message(paths),
+                self._build_batch_review_keyboard(session_id),
+            )
+            KEYBOARD_SESSIONS[session_id] = {
+                "type": "batch",
+                "paths": paths,
+                "message_id": menu_message_id,
+                "closed": False,
+                "state": session_state,
+            }
+        else:
+            await event.send(
+                event.plain_result(self._build_batch_review_message(paths))
+            )
 
         @session_waiter(timeout=SESSION_TIMEOUT)
         async def wait_for_batch_review(
             controller: SessionController, reply_event: AstrMessageEvent
         ) -> None:
+            telegram_session = (
+                KEYBOARD_SESSIONS.get(session_id) if is_telegram else None
+            )
+            if telegram_session:
+                telegram_session["controller"] = controller
+            if telegram_session and telegram_session.get("closed"):
+                controller.stop()
+                return
+
             reply_text = reply_event.message_str.strip()
             normalized = reply_text.lower()
 
+            async def refresh_batch_menu(status: str) -> None:
+                if not is_telegram:
+                    await reply_event.send(reply_event.plain_result(status))
+                    return
+                await self._delete_telegram_reply(reply_event)
+                message = f"{self._build_batch_review_message(paths)}\n\n{status}"
+                await self._edit_telegram_menu(
+                    reply_event,
+                    message,
+                    self._build_batch_review_keyboard(session_id),
+                    message_id=menu_message_id,
+                )
+
             if normalized in ("取消", "cancel", "退出", "exit"):
-                await reply_event.send(reply_event.plain_result("已取消操作。"))
+                if is_telegram:
+                    await self._delete_telegram_reply(reply_event)
+                    if telegram_session:
+                        telegram_session["closed"] = True
+                    session_state["closed"] = True
+                    KEYBOARD_SESSIONS.pop(session_id, None)
+                    await self._edit_telegram_menu(
+                        reply_event, "已取消操作。", None, message_id=menu_message_id
+                    )
+                else:
+                    await reply_event.send(reply_event.plain_result("已取消操作。"))
                 controller.stop()
                 return
 
             if normalized in ("列表", "list", "ls"):
-                await reply_event.send(
-                    reply_event.plain_result(self._build_batch_review_message(paths))
-                )
+                await refresh_batch_menu("已刷新列表。")
                 return
 
             add_path = self._parse_batch_add_path(reply_text)
@@ -894,21 +1224,17 @@ class Main(star.Star):
                 if not add_path.is_absolute():
                     add_path = add_path.resolve()
                 if not self._is_media_file(add_path):
-                    await reply_event.send(
-                        reply_event.plain_result(
-                            f"无法添加，文件不存在或格式不支持: {add_path}"
-                        )
+                    await refresh_batch_menu(
+                        f"无法添加，文件不存在或格式不支持: {add_path}"
                     )
                     return
                 resolved = str(add_path.resolve())
                 if resolved not in paths:
                     paths.append(resolved)
                     paths.sort(key=str.lower)
-                await reply_event.send(
-                    reply_event.plain_result(
-                        f"已添加，当前共 {len(paths)} 个文件。\n"
-                        "回复「确认」开始处理，或「列表」查看。"
-                    )
+                await refresh_batch_menu(
+                    f"已添加，当前共 {len(paths)} 个文件。\n"
+                    "回复「确认」开始处理，或「列表」查看。"
                 )
                 return
 
@@ -916,47 +1242,66 @@ class Main(star.Star):
             if remove_indices is not None:
                 for idx in sorted(remove_indices, reverse=True):
                     paths.pop(idx)
-                await reply_event.send(
-                    reply_event.plain_result(
-                        f"已删除 {len(remove_indices)} 个条目，当前剩余 {len(paths)} 个文件。\n"
-                        "回复「确认」开始处理，或「列表」查看。"
-                    )
+                await refresh_batch_menu(
+                    f"已删除 {len(remove_indices)} 个条目，当前剩余 {len(paths)} 个文件。\n"
+                    "回复「确认」开始处理，或「列表」查看。"
                 )
                 if not paths:
-                    await reply_event.send(
-                        reply_event.plain_result("列表为空，操作结束。")
-                    )
+                    if is_telegram:
+                        if telegram_session:
+                            telegram_session["closed"] = True
+                        session_state["closed"] = True
+                        KEYBOARD_SESSIONS.pop(session_id, None)
+                        await self._edit_telegram_menu(
+                            reply_event,
+                            "列表为空，操作结束。",
+                            None,
+                            message_id=menu_message_id,
+                        )
+                    else:
+                        await reply_event.send(
+                            reply_event.plain_result("列表为空，操作结束。")
+                        )
                     controller.stop()
                 return
 
             if normalized in ("确认", "confirm", "ok", "yes", "y"):
                 if not paths:
-                    await reply_event.send(
-                        reply_event.plain_result("列表为空，无法处理。")
-                    )
+                    await refresh_batch_menu("列表为空，无法处理。")
                     controller.stop()
                     return
                 selected_files = list(paths)
-                await reply_event.send(
-                    reply_event.plain_result(
-                        f"已确认 {len(selected_files)} 个文件，开始批量处理..."
+                if is_telegram:
+                    await self._delete_telegram_reply(reply_event)
+                    if telegram_session:
+                        telegram_session["closed"] = True
+                    session_state["closed"] = True
+                    KEYBOARD_SESSIONS.pop(session_id, None)
+                    setattr(reply_event, "_auex_progress_message_id", menu_message_id)
+                else:
+                    await reply_event.send(
+                        reply_event.plain_result(
+                            f"已确认 {len(selected_files)} 个文件，开始批量处理..."
+                        )
                     )
-                )
                 # End the interactive review session before starting the long-running
                 # extraction task, otherwise the waiter can still hit its timeout.
                 controller.stop()
                 await self._process_audio_extraction(reply_event, selected_files)
                 return
 
-            await reply_event.send(
-                reply_event.plain_result(
-                    "无效输入。请回复「确认」「删除 1,3」「添加 /path/to/file」「列表」或「取消」。"
-                )
+            await refresh_batch_menu(
+                "无效输入。请回复「确认」「删除 1,3」「添加 /path/to/file」「列表」或「取消」。"
             )
 
         try:
             await wait_for_batch_review(event)
         except TimeoutError:
+            if session_state["closed"]:
+                return
+            session = KEYBOARD_SESSIONS.pop(session_id, None) if is_telegram else None
+            if session and session.get("closed"):
+                return
             yield event.plain_result("⏰ 等待超时，操作已取消。")
 
     async def _process_audio_extraction(
@@ -1104,42 +1449,114 @@ class Main(star.Star):
             return
 
         # Multiple files - let user select
-        msg = self._build_file_list_message(results, keyword)
-        msg += f"\n\n⏱ 剪辑时间: {start_time} → {end_time}"
-        yield event.plain_result(msg)
+        is_telegram = isinstance(event, TelegramPlatformEvent)
+        session_id = uuid.uuid4().hex[:8] if is_telegram else ""
+        session_state = {"closed": False}
+        menu_message_id: int | None = None
+        msg = self._build_vclip_message(results, keyword, start_time, end_time)
+
+        if is_telegram:
+            menu_message_id = await self._send_telegram_menu(
+                event,
+                msg,
+                self._build_vclip_keyboard(session_id, results, set()),
+            )
+            KEYBOARD_SESSIONS[session_id] = {
+                "type": "vclip",
+                "results": results,
+                "selected": set(),
+                "keyword": keyword,
+                "start_time": start_time,
+                "end_time": end_time,
+                "message_id": menu_message_id,
+                "closed": False,
+                "state": session_state,
+            }
+        else:
+            yield event.plain_result(msg)
 
         @session_waiter(timeout=SESSION_TIMEOUT)
         async def wait_for_selection(
             controller: SessionController, reply_event: AstrMessageEvent
         ) -> None:
+            telegram_session = (
+                KEYBOARD_SESSIONS.get(session_id) if is_telegram else None
+            )
+            if telegram_session:
+                telegram_session["controller"] = controller
+            if telegram_session and telegram_session.get("closed"):
+                controller.stop()
+                return
+
             reply_text = reply_event.message_str.strip()
 
             if reply_text.lower() in ("取消", "cancel", "退出", "exit"):
-                await reply_event.send(reply_event.plain_result("已取消操作。"))
+                if is_telegram:
+                    await self._delete_telegram_reply(reply_event)
+                    if telegram_session:
+                        telegram_session["closed"] = True
+                    session_state["closed"] = True
+                    KEYBOARD_SESSIONS.pop(session_id, None)
+                    await self._edit_telegram_menu(
+                        reply_event, "已取消操作。", None, message_id=menu_message_id
+                    )
+                else:
+                    await reply_event.send(reply_event.plain_result("已取消操作。"))
                 controller.stop()
                 return
 
             selected = self._parse_selection(reply_text, len(results))
             if selected is None:
-                await reply_event.send(
-                    reply_event.plain_result(
-                        "无效输入，请输入序号（如 1,3,5 或 1-5）\n回复「取消」退出"
+                if is_telegram:
+                    await self._delete_telegram_reply(reply_event)
+                    keyboard_selected = (
+                        telegram_session["selected"] if telegram_session else set()
                     )
-                )
+                    await self._edit_telegram_menu(
+                        reply_event,
+                        f"{msg}\n\n无效输入，请输入序号（如 1,3,5 或 1-5）\n回复「取消」退出",
+                        self._build_vclip_keyboard(
+                            session_id, results, keyboard_selected
+                        ),
+                        message_id=menu_message_id,
+                    )
+                else:
+                    await reply_event.send(
+                        reply_event.plain_result(
+                            "无效输入，请输入序号（如 1,3,5 或 1-5）\n回复「取消」退出"
+                        )
+                    )
                 return
 
             if not selected:
-                await reply_event.send(
-                    reply_event.plain_result("请至少选择一个文件\n回复「取消」退出")
-                )
+                if is_telegram:
+                    await self._delete_telegram_reply(reply_event)
+                    await self._edit_telegram_menu(
+                        reply_event,
+                        f"{msg}\n\n请至少选择一个文件\n回复「取消」退出",
+                        self._build_vclip_keyboard(session_id, results, set()),
+                        message_id=menu_message_id,
+                    )
+                else:
+                    await reply_event.send(
+                        reply_event.plain_result("请至少选择一个文件\n回复「取消」退出")
+                    )
                 return
 
             selected_files = [results[i] for i in selected]
-            await reply_event.send(
-                reply_event.plain_result(
-                    f"已选择 {len(selected_files)} 个文件，开始剪辑..."
+            if is_telegram:
+                await self._delete_telegram_reply(reply_event)
+                if telegram_session:
+                    telegram_session["closed"] = True
+                session_state["closed"] = True
+                KEYBOARD_SESSIONS.pop(session_id, None)
+                setattr(reply_event, "_auex_progress_message_id", menu_message_id)
+            else:
+                await reply_event.send(
+                    reply_event.plain_result(
+                        f"已选择 {len(selected_files)} 个文件，开始剪辑..."
+                    )
                 )
-            )
             await self._process_video_clip(
                 reply_event, selected_files, time_params[0], time_params[1]
             )
@@ -1148,6 +1565,11 @@ class Main(star.Star):
         try:
             await wait_for_selection(event)
         except TimeoutError:
+            if session_state["closed"]:
+                return
+            session = KEYBOARD_SESSIONS.pop(session_id, None) if is_telegram else None
+            if session and session.get("closed"):
+                return
             yield event.plain_result("⏰ 等待超时，操作已取消。")
 
     async def _process_video_clip(

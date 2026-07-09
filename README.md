@@ -44,7 +44,7 @@ Notes:
 
 `/auex search` searches for video files matching the keyword and extracts audio as MP3. Multiple keywords can be separated by Chinese or English commas, and merged search results show the first 20 files for selection.
 
-`/auex batch` is admin-only. It scans a directory recursively for media files without subtitle or lyrics sidecars. After the review message, you can confirm the full list, remove entries by index, add explicit file paths, or cancel. Confirmed files are extracted with the same FFmpeg settings as `auex search`, and job files are written to the plugin work directory for scheduled subtitle sync.
+`/auex batch` is admin-only. It scans a directory recursively for media files without subtitle or lyrics sidecars. After the review message, you can confirm the full list, remove entries by index, add explicit file paths, or cancel. On Telegram, confirm, refresh, and cancel are also available as inline buttons; add/remove still use text replies. Confirmed files are extracted with the same FFmpeg settings as `auex search`, and job files are written to the plugin work directory for scheduled subtitle sync.
 
 **Example:**
 ```
@@ -60,7 +60,7 @@ Notes:
 /vclip <keyword> <HMMSS-HMMSS>
 ```
 
-Clip video segment by time range. Time format: `HH:MM:SS`, `MM:SS`, or compact interval `HMMSS-HMMSS` / `HHMMSS-HHMMSS`.
+Clip video segment by time range. Time format: `HH:MM:SS`, `MM:SS`, or compact interval `HMMSS-HMMSS` / `HHMMSS-HHMMSS`. On Telegram, multi-file search results can be selected with inline buttons or by replying with index selections such as `1,3` or `1-5`.
 
 **Example:**
 ```
@@ -93,6 +93,11 @@ The plugin automatically runs the following scheduled tasks:
 - You can change indexed file types with `index_extensions`.
 
 ## Changelog
+
+### v1.1.9
+
+- Added Telegram inline buttons for `/auex batch` review confirm, refresh, and cancel actions.
+- Added Telegram inline multi-file selection and in-place text fallback refresh for `/vclip`.
 
 ### v1.1.8
 
