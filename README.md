@@ -60,7 +60,7 @@ Notes:
 /vclip <keyword> <HMMSS-HMMSS>
 ```
 
-Clip video segment by time range. Time format: `HH:MM:SS`, `MM:SS`, or compact interval `HMMSS-HMMSS` / `HHMMSS-HHMMSS`. On Telegram, multi-file search results can be selected with inline buttons or by replying with index selections such as `1,3` or `1-5`.
+Clip video segment by time range. Time format: `HH:MM:SS`, `MM:SS`, or compact interval `HMMSS-HMMSS` / `HHMMSS-HHMMSS`. On Telegram, multi-file search results can be selected with inline buttons or by replying with index selections such as `1,3` or `1-5`; handled replies are consumed and do not trigger an LLM response.
 
 **Example:**
 ```
@@ -93,6 +93,10 @@ The plugin automatically runs the following scheduled tasks:
 - You can change indexed file types with `index_extensions`.
 
 ## Changelog
+
+### v1.1.10
+
+- Fixed Telegram `/vclip` text selections being processed by the LLM after the clip task completed.
 
 ### v1.1.9
 

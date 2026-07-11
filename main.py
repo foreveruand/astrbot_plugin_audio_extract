@@ -1489,6 +1489,8 @@ class Main(star.Star):
                 return
 
             reply_text = reply_event.message_str.strip()
+            if is_telegram:
+                reply_event.stop_event()
 
             if reply_text.lower() in ("取消", "cancel", "退出", "exit"):
                 if is_telegram:

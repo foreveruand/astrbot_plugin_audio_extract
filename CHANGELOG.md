@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.1.10
+
+- Fixed Telegram `/vclip` text selections being processed by the LLM after the clip task completed.
+
 ## v1.1.9
 
 - Added Telegram inline menu support for `/auex batch` review confirm, refresh, and cancel actions.
