@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.1.13
+
+- Fixed Telegram `/vclip` text-selection sessions remaining active after clip processing errors and consuming later commands.
+
+## v1.1.12
+
+- Fixed Telegram `/vclip` commands falling through to the LLM after a text-selected clip task finishes.
+
+## v1.1.11
+
+- Fixed Telegram `/vclip` and `/auex` inline keyboard callbacks continuing to the LLM after plugin handling.
+
 ## v1.1.10
 
 - Fixed Telegram `/vclip` text selections being processed by the LLM after the clip task completed.

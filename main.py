@@ -841,6 +841,9 @@ class Main(star.Star):
             event.continue_event()
             return
 
+        # Telegram callback payloads are control events, not LLM prompts.
+        event.stop_event()
+
         parts = event.data.split(":")
         if len(parts) < 3:
             return
@@ -1475,6 +1478,10 @@ class Main(star.Star):
         else:
             yield event.plain_result(msg)
 
+        # The command event resumes after the selection session finishes; prevent it
+        # from falling through to the default LLM handler at that point.
+        event.stop_event()
+
         @session_waiter(timeout=SESSION_TIMEOUT)
         async def wait_for_selection(
             controller: SessionController, reply_event: AstrMessageEvent
@@ -1559,10 +1566,12 @@ class Main(star.Star):
                         f"已选择 {len(selected_files)} 个文件，开始剪辑..."
                     )
                 )
+            # End the interactive session before processing so errors cannot leave
+            # it consuming later commands or deleting their Telegram messages.
+            controller.stop()
             await self._process_video_clip(
                 reply_event, selected_files, time_params[0], time_params[1]
             )
-            controller.stop()
 
         try:
             await wait_for_selection(event)
