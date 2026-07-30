@@ -68,39 +68,67 @@ async def ffmpeg_progress_generator(
         "out_time": None,
         "speed": None,
     }
+    progress_updated = asyncio.Event()
 
     try:
         process = await asyncio.create_subprocess_exec(
             *command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
         )
 
+        async def read_progress() -> None:
+            """Continuously read FFmpeg output and retain only the latest state."""
+            nonlocal total_duration
+
+            try:
+                while True:
+                    line = await process.stderr.readline()
+                    if not line:
+                        break
+
+                    decoded = line.decode("utf-8", errors="replace").strip()
+
+                    if total_duration is None:
+                        duration = parse_ffmpeg_duration(decoded)
+                        if duration:
+                            total_duration = duration
+                            continue
+
+                    if update_progress_state(decoded, progress_state):
+                        progress_updated.set()
+            finally:
+                progress_updated.set()
+
+        reader_task = asyncio.create_task(read_progress())
         last_yield_time = 0.0
+        last_progress = None
 
         while True:
-            line = await process.stderr.readline()
-            if not line:
+            await progress_updated.wait()
+            if reader_task.done():
                 break
 
-            decoded = line.decode("utf-8", errors="replace").strip()
+            remaining = interval - (time.monotonic() - last_yield_time)
+            if remaining > 0:
+                await asyncio.sleep(remaining)
 
-            # Try to parse total duration
-            if total_duration is None:
-                d = parse_ffmpeg_duration(decoded)
-                if d:
-                    total_duration = d
-                    continue
+            progress_updated.clear()
+            formatted = format_ffmpeg_progress(progress_state, total_duration)
+            if formatted and formatted != last_progress:
+                last_yield_time = time.monotonic()
+                last_progress = formatted
+                yield ("progress", formatted)
 
-            # Update progress state
-            if update_progress_state(decoded, progress_state):
-                now = time.monotonic()
-                formatted = format_ffmpeg_progress(progress_state, total_duration)
+            if reader_task.done():
+                break
 
-                # Throttle control
-                if formatted and (now - last_yield_time >= interval):
-                    last_yield_time = now
-                    yield ("progress", formatted)
+        await reader_task
 
         await process.wait()
+
+        # Always publish the final snapshot, regardless of the update interval.
+        final_progress = format_ffmpeg_progress(progress_state, total_duration)
+        if final_progress and final_progress != last_progress:
+            yield ("progress", final_progress)
 
         if process.returncode == 0:
             yield ("success", "FFmpeg processing complete")

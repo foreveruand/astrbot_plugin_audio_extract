@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.1.17
+
+- Fixed `/vclip` to edit each clip progress message into its copyable completion filename instead of sending an additional summary message, with a fallback send when Telegram progress delivery fails.
+
+## v1.1.16
+
+- Fixed `/vclip` progress percentages to use the requested clip duration rather than the source video duration, and removed progress text from the completion message.
+
+## v1.1.15
+
+- Fixed `/vclip` progress updates to use the latest FFmpeg state instead of delayed stderr output, and include the final progress snapshot on completion.
+
+## v1.1.14
+
+- Fixed Telegram progress throttling dropping fast `/vclip` completion messages, including clipped output filenames.
+
 ## v1.1.13
 
 - Fixed Telegram `/vclip` text-selection sessions remaining active after clip processing errors and consuming later commands.

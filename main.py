@@ -185,6 +185,7 @@ class Main(star.Star):
             return msg.message_id
         except Exception as exc:
             logger.warning(f"Failed to send Telegram progress message: {exc}")
+            await event.send(event.plain_result(text))
             return None
 
     def _telegram_reply_markup(
@@ -282,7 +283,14 @@ class Main(star.Star):
                 continue
 
             current_time = asyncio.get_running_loop().time()
-            if last_text and (current_time - last_update_time) < throttle_interval:
+            is_terminal_update = any(
+                token in text for token in ("✅", "❌", "完成", "失败", "出错")
+            )
+            if (
+                last_text
+                and (current_time - last_update_time) < throttle_interval
+                and not is_terminal_update
+            ):
                 continue
 
             edited = False
@@ -1591,6 +1599,16 @@ class Main(star.Star):
         end_time: str,
     ) -> None:
         """Process video clipping for multiple video files."""
+        start_seconds = sum(
+            int(value) * multiplier
+            for value, multiplier in zip(start_time.split(":"), (3600, 60, 1))
+        )
+        end_seconds = sum(
+            int(value) * multiplier
+            for value, multiplier in zip(end_time.split(":"), (3600, 60, 1))
+        )
+        clip_duration = end_seconds - start_seconds
+
         for i, video_path in enumerate(video_paths, 1):
             video_path_obj = Path(video_path)
 
@@ -1607,7 +1625,9 @@ class Main(star.Star):
             async def progress_stream() -> AsyncGenerator[str, None]:
                 base_prefix = f"[{i}/{len(video_paths)}] `{video_path_obj.stem}`"
                 yield f"{base_prefix} 剪辑中...\n⏱ {start_time} → {end_time}"
-                async for status, msg in ffmpeg_progress_generator(cmd):
+                async for status, msg in ffmpeg_progress_generator(
+                    cmd, total_duration=clip_duration if clip_duration > 0 else None
+                ):
                     if status == "progress":
                         yield f"{base_prefix}\n{msg}"
                     elif status == "success":
@@ -1621,10 +1641,6 @@ class Main(star.Star):
                         return
 
             await self._send_stream_updates(event, progress_stream)
-
-        await event.send(
-            MessageChain([Plain(f"✅ 全部完成! 共剪辑 {len(video_paths)} 个文件")])
-        )
 
     @filter.command("aurebuild")
     @filter.permission_type(filter.PermissionType.ADMIN)
