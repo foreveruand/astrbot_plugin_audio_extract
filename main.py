@@ -28,6 +28,7 @@ from astrbot.core.platform.sources.telegram.tg_event import (
     TelegramPlatformEvent,
 )
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
+from astrbot.core.utils.session_waiter import USER_SESSIONS
 
 from .database import normalize_index_extensions
 from .ffmpeg_utils import (
@@ -176,6 +177,8 @@ class Main(star.Star):
                 "text": formatted_text,
                 **text_kwargs,
             }
+            if isinstance(event, TelegramPlatformEvent):
+                payload["reply_to_message_id"] = event.message_obj.message_id
             if isinstance(chat_id, str) and "#" in chat_id:
                 chat_id, message_thread_id = chat_id.split("#", 1)
                 payload["chat_id"] = chat_id
@@ -229,6 +232,7 @@ class Main(star.Star):
             "chat_id": chat_id,
             "text": formatted_text,
             "reply_markup": self._telegram_reply_markup(keyboard),
+            "reply_to_message_id": event.message_obj.message_id,
             **text_kwargs,
         }
         if isinstance(chat_id, str) and "#" in chat_id:
@@ -243,6 +247,29 @@ class Main(star.Star):
             logger.warning(f"Failed to send Telegram menu message: {exc}")
             await event.send(event.plain_result(text))
             return None
+
+    def _close_telegram_selection_session(self, session_id: str) -> dict | None:
+        """Close a Telegram selection session and its input waiter.
+
+        Args:
+            session_id: Inline keyboard session ID.
+
+        Returns:
+            The removed keyboard session, if it existed.
+        """
+        session = KEYBOARD_SESSIONS.pop(session_id, None)
+        if not session:
+            return None
+
+        session["closed"] = True
+        session["state"]["closed"] = True
+        controller = session.get("controller")
+        if controller is None:
+            waiter = USER_SESSIONS.get(session.get("origin", ""))
+            controller = waiter.session_controller if waiter else None
+        if controller:
+            controller.stop()
+        return session
 
     async def _delete_telegram_reply(self, event: AstrMessageEvent) -> None:
         """Delete a Telegram user reply when the platform permits it.
@@ -908,11 +935,7 @@ class Main(star.Star):
             keyword = session["keyword"]
 
             if action == "cancel":
-                session["closed"] = True
-                session["state"]["closed"] = True
-                if controller := session.get("controller"):
-                    controller.stop()
-                KEYBOARD_SESSIONS.pop(session_id, None)
+                self._close_telegram_selection_session(session_id)
                 await event.answer_callback_query(text="已取消操作")
                 await self._edit_telegram_menu(event, "已取消操作。", None)
                 return
@@ -934,11 +957,7 @@ class Main(star.Star):
                     await event.answer_callback_query(text="请至少选择一个文件")
                     return
                 selected_files = [results[i] for i in sorted(selected)]
-                session["closed"] = True
-                session["state"]["closed"] = True
-                if controller := session.get("controller"):
-                    controller.stop()
-                KEYBOARD_SESSIONS.pop(session_id, None)
+                self._close_telegram_selection_session(session_id)
                 await event.answer_callback_query()
                 await self._process_video_clip(
                     event, selected_files, start_time, end_time
@@ -1441,6 +1460,18 @@ class Main(star.Star):
         start_time = normalize_time_format(start_time)
         end_time = normalize_time_format(end_time)
 
+        start_seconds = sum(
+            int(v) * m for v, m in zip(start_time.split(":"), (3600, 60, 1))
+        )
+        end_seconds = sum(
+            int(v) * m for v, m in zip(end_time.split(":"), (3600, 60, 1))
+        )
+        if end_seconds <= start_seconds:
+            yield event.plain_result(
+                f"结束时间必须晚于开始时间\n⏱ {start_time} → {end_time}"
+            )
+            return
+
         selector = FileSelector(self.config)
         results = await selector.search_files(keyword, limit=15)
 
@@ -1453,9 +1484,12 @@ class Main(star.Star):
 
         # Single file - process directly
         if len(results) == 1:
-            yield event.plain_result(
-                f"找到 1 个文件，开始剪辑...\n⏱ {start_time} → {end_time}"
-            )
+            status = f"找到 1 个文件，开始剪辑...\n⏱ {start_time} → {end_time}"
+            if isinstance(event, TelegramPlatformEvent):
+                message_id = await self._send_telegram_progress_message(event, status)
+                setattr(event, "_auex_progress_message_id", message_id)
+            else:
+                yield event.plain_result(status)
             await self._process_video_clip(event, results, start_time, end_time)
             return
 
@@ -1482,6 +1516,7 @@ class Main(star.Star):
                 "message_id": menu_message_id,
                 "closed": False,
                 "state": session_state,
+                "origin": event.unified_msg_origin,
             }
         else:
             yield event.plain_result(msg)
@@ -1510,15 +1545,12 @@ class Main(star.Star):
             if reply_text.lower() in ("取消", "cancel", "退出", "exit"):
                 if is_telegram:
                     await self._delete_telegram_reply(reply_event)
-                    if telegram_session:
-                        telegram_session["closed"] = True
-                    session_state["closed"] = True
-                    KEYBOARD_SESSIONS.pop(session_id, None)
+                    self._close_telegram_selection_session(session_id)
                     await self._edit_telegram_menu(
                         reply_event, "已取消操作。", None, message_id=menu_message_id
                     )
-                else:
-                    await reply_event.send(reply_event.plain_result("已取消操作。"))
+                    return
+                await reply_event.send(reply_event.plain_result("已取消操作。"))
                 controller.stop()
                 return
 
@@ -1563,10 +1595,7 @@ class Main(star.Star):
             selected_files = [results[i] for i in selected]
             if is_telegram:
                 await self._delete_telegram_reply(reply_event)
-                if telegram_session:
-                    telegram_session["closed"] = True
-                session_state["closed"] = True
-                KEYBOARD_SESSIONS.pop(session_id, None)
+                self._close_telegram_selection_session(session_id)
                 setattr(reply_event, "_auex_progress_message_id", menu_message_id)
             else:
                 await reply_event.send(
@@ -1576,7 +1605,8 @@ class Main(star.Star):
                 )
             # End the interactive session before processing so errors cannot leave
             # it consuming later commands or deleting their Telegram messages.
-            controller.stop()
+            if not is_telegram:
+                controller.stop()
             await self._process_video_clip(
                 reply_event, selected_files, time_params[0], time_params[1]
             )
@@ -1586,10 +1616,16 @@ class Main(star.Star):
         except TimeoutError:
             if session_state["closed"]:
                 return
-            session = KEYBOARD_SESSIONS.pop(session_id, None) if is_telegram else None
-            if session and session.get("closed"):
-                return
-            yield event.plain_result("⏰ 等待超时，操作已取消。")
+            if is_telegram:
+                self._close_telegram_selection_session(session_id)
+                await self._edit_telegram_menu(
+                    event, "⏰ 等待超时，操作已取消。", None, message_id=menu_message_id
+                )
+            else:
+                yield event.plain_result("⏰ 等待超时，操作已取消。")
+        finally:
+            if is_telegram:
+                self._close_telegram_selection_session(session_id)
 
     async def _process_video_clip(
         self,

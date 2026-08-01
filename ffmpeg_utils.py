@@ -21,9 +21,17 @@ def update_progress_state(line: str, state: dict) -> bool:
     """
     Update FFmpeg progress state.
     Returns True if this line may trigger a progress output.
+
+    FFmpeg may emit non-numeric placeholders such as ``out_time_ms=N/A`` when
+    running in stream-copy mode (``-c copy``). Those values are skipped instead
+    of being fed to ``int()``, so progress parsing never raises and the clip
+    operation is not aborted by a harmless ``N/A`` report.
     """
     if line.startswith("out_time_ms="):
-        state["out_time"] = int(line.split("=", 1)[1]) / 1_000_000
+        value = line.split("=", 1)[1].strip()
+        if value == "N/A" or not value.lstrip("-").isdigit():
+            return False
+        state["out_time"] = int(value) / 1_000_000
         return True
     if line.startswith("speed="):
         state["speed"] = line.split("=", 1)[1]
@@ -192,9 +200,19 @@ def build_video_clip_command(
 
 
 def validate_time_format(time_str: str) -> bool:
-    """Validate time format (HH:MM:SS or MM:SS)."""
-    pattern = r"^\d{1,2}:\d{2}(:\d{2})?$"
-    return bool(re.match(pattern, time_str))
+    """Validate time format (HH:MM:SS or MM:SS).
+
+    Rejects syntactically correct but out-of-range values such as ``99:99`` so
+    downstream clipping math and FFmpeg do not receive invalid timestamps.
+    """
+    if not re.match(r"^\d{1,2}:\d{2}(:\d{2})?$", time_str):
+        return False
+    parts = [int(p) for p in time_str.split(":")]
+    if len(parts) == 2:
+        minute, second = parts
+    else:
+        _, minute, second = parts
+    return minute < 60 and second < 60
 
 
 def normalize_time_format(time_str: str) -> str:

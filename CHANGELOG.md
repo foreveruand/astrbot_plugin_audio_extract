@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.1.19
+
+- Updated Telegram `/vclip` to reuse its reply message for file selection and clip progress, including single-file clips.
+- Fixed Telegram inline selection confirmation and cancellation to stop the pending input waiter immediately, preventing later user messages from being intercepted after completion or failure.
+
+## v1.1.18
+
+- Fixed `/vclip` aborting with `❌ 出错: invalid literal for int() with base 10: 'N/A'` when FFmpeg stream-copy mode emits `out_time_ms=N/A`; non-numeric progress fields are now skipped instead of crashing the clip.
+- Added `/vclip` input validation: out-of-range minutes/seconds (e.g. `00:99:99`) are rejected, and end time must be later than the start time.
+
 ## v1.1.17
 
 - Fixed `/vclip` to edit each clip progress message into its copyable completion filename instead of sending an additional summary message, with a fallback send when Telegram progress delivery fails.
