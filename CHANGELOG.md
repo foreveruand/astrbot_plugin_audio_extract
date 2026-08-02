@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.1.21
+
+- Updated Telegram `/auex search` to edit its command reply in place for file selection, cancellation, and extraction progress, including single-file searches.
+- Fixed `/auex search` commands and text-selection replies being processed by the LLM, and release the selection session before extraction starts.
+
+## v1.1.20
+
+- Fixed `/vclip` command and file-selection replies falling through to the LLM after clip processing completes.
+
 ## v1.1.19
 
 - Updated Telegram `/vclip` to reuse its reply message for file selection and clip progress, including single-file clips.

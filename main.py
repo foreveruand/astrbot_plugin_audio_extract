@@ -18,7 +18,7 @@ import telegramify_markdown
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from astrbot.api import AstrBotConfig, star
-from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
+from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Plain
 from astrbot.api.util import SessionController, session_waiter
 from astrbot.core.message.message_event_result import MessageChain
@@ -988,12 +988,9 @@ class Main(star.Star):
         selected = session["selected"]
 
         if action == "cancel":
-            # Cancel operation
-            del KEYBOARD_SESSIONS[session_id]
+            self._close_telegram_selection_session(session_id)
             await event.answer_callback_query(text="已取消操作")
-            result = MessageEventResult()
-            result.message("已取消操作。")
-            event.set_result(result)
+            await self._edit_telegram_menu(event, "已取消操作。", None)
             return
 
         if action == "all":
@@ -1004,13 +1001,11 @@ class Main(star.Star):
 
             await event.answer_callback_query(text=f"已选择全部 {len(results)} 个文件")
 
-            # Update keyboard
-            result = MessageEventResult()
-            result.message(f"🔍 已选择全部 {len(results)} 个文件")
-            result.inline_keyboard(
-                self._build_inline_keyboard(session_id, results, selected)
+            await self._edit_telegram_menu(
+                event,
+                f"🔍 已选择全部 {len(results)} 个文件",
+                self._build_inline_keyboard(session_id, results, selected),
             )
-            event.set_result(result)
             return
 
         if action == "confirm":
@@ -1020,7 +1015,7 @@ class Main(star.Star):
                 return
 
             selected_files = [results[i] for i in sorted(selected)]
-            del KEYBOARD_SESSIONS[session_id]
+            self._close_telegram_selection_session(session_id)
 
             # Only acknowledge the click; progress updates will replace the message.
             await event.answer_callback_query()
@@ -1049,13 +1044,11 @@ class Main(star.Star):
                 else "🔍 请选择文件"
             )
 
-            # Update keyboard
-            result = MessageEventResult()
-            result.message(msg)
-            result.inline_keyboard(
-                self._build_inline_keyboard(session_id, results, selected)
+            await self._edit_telegram_menu(
+                event,
+                msg,
+                self._build_inline_keyboard(session_id, results, selected),
             )
-            event.set_result(result)
 
         except ValueError:
             await event.answer_callback_query(text="无效操作")
@@ -1068,6 +1061,8 @@ class Main(star.Star):
             /auex search <keyword> - Search and extract audio from video files matching keyword
         """
         await self.initialize()
+        # The command and its text-selection replies are plugin control input.
+        event.stop_event()
 
         keyword = keyword.strip()
         keywords = self._split_search_keywords(keyword)
@@ -1087,29 +1082,38 @@ class Main(star.Star):
 
         # Single file - process directly
         if len(results) == 1:
-            yield event.plain_result("找到 1 个文件，开始处理...")
+            status = "找到 1 个文件，开始处理..."
+            if isinstance(event, TelegramPlatformEvent):
+                message_id = await self._send_telegram_progress_message(event, status)
+                setattr(event, "_auex_progress_message_id", message_id)
+            else:
+                yield event.plain_result(status)
             await self._process_audio_extraction(event, results)
             return
 
         # Multiple files - check platform for inline keyboard support
-        is_telegram = event.get_platform_name() == "telegram"
+        is_telegram = isinstance(event, TelegramPlatformEvent)
 
         if is_telegram:
             # Use inline keyboard for Telegram
             session_id = uuid.uuid4().hex[:8]
+            session_state = {"closed": False}
+            msg = f"🔍 找到 {len(results)} 个匹配「{keyword_label}」的文件"
+            menu_message_id = await self._send_telegram_menu(
+                event,
+                msg,
+                self._build_inline_keyboard(session_id, results, set()),
+            )
             KEYBOARD_SESSIONS[session_id] = {
+                "type": "search",
                 "results": results,
                 "selected": set(),
                 "keyword": keyword_label,
+                "message_id": menu_message_id,
+                "closed": False,
+                "state": session_state,
+                "origin": event.unified_msg_origin,
             }
-
-            msg = f"🔍 找到 {len(results)} 个匹配「{keyword_label}」的文件"
-            result = MessageEventResult()
-            result.message(msg)
-            result.inline_keyboard(
-                self._build_inline_keyboard(session_id, results, set())
-            )
-            event.set_result(result)
             return
 
         # Non-Telegram platforms: use text selection
@@ -1121,6 +1125,7 @@ class Main(star.Star):
             controller: SessionController, reply_event: AstrMessageEvent
         ) -> None:
             reply_text = reply_event.message_str.strip()
+            reply_event.stop_event()
 
             if reply_text.lower() in ("取消", "cancel", "退出", "exit"):
                 await reply_event.send(reply_event.plain_result("已取消操作。"))
@@ -1148,8 +1153,8 @@ class Main(star.Star):
                     f"已选择 {len(selected_files)} 个文件，开始处理..."
                 )
             )
-            await self._process_audio_extraction(reply_event, selected_files)
             controller.stop()
+            await self._process_audio_extraction(reply_event, selected_files)
 
         try:
             await wait_for_selection(event)
@@ -1418,6 +1423,8 @@ class Main(star.Star):
             Example: /vclip movie 10101-20356
         """
         await self.initialize()
+        # A vclip command and its selection replies are plugin control input.
+        event.stop_event()
 
         message = event.message_str.strip()
         parts = message.replace("vclip", "", 1).strip().split()
@@ -1521,10 +1528,6 @@ class Main(star.Star):
         else:
             yield event.plain_result(msg)
 
-        # The command event resumes after the selection session finishes; prevent it
-        # from falling through to the default LLM handler at that point.
-        event.stop_event()
-
         @session_waiter(timeout=SESSION_TIMEOUT)
         async def wait_for_selection(
             controller: SessionController, reply_event: AstrMessageEvent
@@ -1539,8 +1542,7 @@ class Main(star.Star):
                 return
 
             reply_text = reply_event.message_str.strip()
-            if is_telegram:
-                reply_event.stop_event()
+            reply_event.stop_event()
 
             if reply_text.lower() in ("取消", "cancel", "退出", "exit"):
                 if is_telegram:

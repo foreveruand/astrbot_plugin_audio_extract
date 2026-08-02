@@ -42,7 +42,7 @@ Notes:
 /auex batch <directory>
 ```
 
-`/auex search` searches for video files matching the keyword and extracts audio as MP3. Multiple keywords can be separated by Chinese or English commas, and merged search results show the first 20 files for selection.
+`/auex search` searches for video files matching the keyword and extracts audio as MP3. Multiple keywords can be separated by Chinese or English commas, and merged search results show the first 20 files for selection. On Telegram, file selection, cancellation, and extraction progress update the command reply in place; handled commands, callbacks, and text selections do not trigger an LLM response.
 
 `/auex batch` is admin-only. It scans a directory recursively for media files without subtitle or lyrics sidecars. After the review message, you can confirm the full list, remove entries by index, add explicit file paths, or cancel. On Telegram, confirm, refresh, and cancel are also available as inline buttons; add/remove still use text replies. Confirmed files are extracted with the same FFmpeg settings as `auex search`, and job files are written to the plugin work directory for scheduled subtitle sync.
 
@@ -93,6 +93,15 @@ The plugin automatically runs the following scheduled tasks:
 - You can change indexed file types with `index_extensions`.
 
 ## Changelog
+
+### v1.1.21
+
+- Telegram `/auex search` now updates its command reply in place for selection, cancellation, and extraction progress, including single-file searches.
+- Fixed `/auex search` command and selection input falling through to the LLM.
+
+### v1.1.20
+
+- Fixed `/vclip` command and file-selection replies falling through to the LLM after clip processing completes.
 
 ### v1.1.19
 
