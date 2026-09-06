@@ -58,15 +58,18 @@ Notes:
 ```
 /vclip <keyword> <start_time> <end_time>
 /vclip <keyword> <HMMSS-HMMSS>
+/vclip <keyword> <time_point>
 ```
 
-Clip video segment by time range. Time format: `HH:MM:SS`, `MM:SS`, or compact interval `HMMSS-HMMSS` / `HHMMSS-HHMMSS`. On Telegram, the command reply is updated in place for file selection and clipping progress. Multi-file search results can be selected with inline buttons or by replying with index selections such as `1,3` or `1-5`; handled commands, callbacks, and replies are consumed and do not trigger an LLM response.
+Clip video segment by time range. Time format: `HH:MM:SS`, `MM:SS`, or compact interval `HMMSS-HMMSS` / `HHMMSS-HHMMSS`. You can also provide one time point first; the plugin keeps it in memory during the current run and starts clipping when the same file is called again with a second time point. The first point is always the start time. On Telegram, the command reply is updated in place for file selection and clipping progress. Multi-file search results can be selected with inline buttons or by replying with index selections such as `1,3` or `1-5`; handled commands, callbacks, and replies are consumed and do not trigger an LLM response.
 
 **Example:**
 ```
 /vclip movie 00:05:30 00:10:45
 /vclip video 5:30 10:45
 /vclip movie 10101-20356
+/vclip movie 00:05:30
+/vclip movie 00:10:45
 ```
 
 ### Index Rebuild (Admin)
@@ -93,6 +96,11 @@ The plugin automatically runs the following scheduled tasks:
 - You can change indexed file types with `index_extensions`.
 
 ## Changelog
+
+### v1.1.22
+
+- Added two-step `/vclip` time-point input. The first time point is kept in memory for the current run, and the second time point starts clipping for the matching file.
+- Existing full-range and compact-interval `/vclip` arguments remain supported.
 
 ### v1.1.21
 

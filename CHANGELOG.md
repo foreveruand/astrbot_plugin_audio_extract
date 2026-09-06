@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.1.22
+
+- Added two-step `/vclip` time-point input. The first time point is kept in memory for the current run, and the second time point starts clipping for the matching file.
+- Existing full-range and compact-interval `/vclip` arguments remain supported.
+
 ## v1.1.21
 
 - Updated Telegram `/auex search` to edit its command reply in place for file selection, cancellation, and extraction progress, including single-file searches.

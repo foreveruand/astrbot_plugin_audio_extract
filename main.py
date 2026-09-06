@@ -36,6 +36,7 @@ from .ffmpeg_utils import (
     build_video_clip_command,
     ffmpeg_progress_generator,
     normalize_time_format,
+    parse_compact_time_format,
     parse_compact_time_interval,
     validate_time_format,
 )
@@ -74,6 +75,7 @@ class Main(star.Star):
         self.context = context
         self.config = config
         self._initialized = False
+        self._vclip_time_points: dict[tuple[str, str], str] = {}
 
     def _platform_supports_progress_edit(self, event: AstrMessageEvent) -> bool:
         """Return whether the current event supports in-place progress updates."""
@@ -791,7 +793,11 @@ class Main(star.Star):
         ]
 
     def _build_vclip_message(
-        self, results: list[str], keyword: str, start_time: str, end_time: str
+        self,
+        results: list[str],
+        keyword: str,
+        start_time: str,
+        end_time: str = "",
     ) -> str:
         """Build the video clip selection message.
 
@@ -805,7 +811,51 @@ class Main(star.Star):
             Selection message text.
         """
         msg = self._build_file_list_message(results, keyword)
+        if not end_time:
+            return f"{msg}\n\n⏱ 已输入时间点: {start_time}\n请再输入一个时间点完成剪辑"
         return f"{msg}\n\n⏱ 剪辑时间: {start_time} → {end_time}"
+
+    def _consume_vclip_point_selection(
+        self, origin: str, video_paths: list[str], end_time: str
+    ) -> tuple[dict[tuple[str, str], list[str]], int, int]:
+        """Store a point or group files whose stored point completes a clip.
+
+        Args:
+            origin: Message session used to isolate pending points.
+            video_paths: Selected video paths.
+            end_time: Current point, used as the end time when a start exists.
+
+        Returns:
+            A tuple containing clip groups, recorded-file count, and invalid-file count.
+        """
+        end_seconds = sum(
+            int(value) * multiplier
+            for value, multiplier in zip(end_time.split(":"), (3600, 60, 1))
+        )
+        clip_groups: dict[tuple[str, str], list[str]] = {}
+        recorded_count = 0
+        invalid_count = 0
+
+        for video_path in video_paths:
+            storage_key = (origin, video_path)
+            stored_start = self._vclip_time_points.get(storage_key)
+            if stored_start is None:
+                self._vclip_time_points[storage_key] = end_time
+                recorded_count += 1
+                continue
+
+            start_seconds = sum(
+                int(value) * multiplier
+                for value, multiplier in zip(stored_start.split(":"), (3600, 60, 1))
+            )
+            if end_seconds <= start_seconds:
+                invalid_count += 1
+                continue
+
+            self._vclip_time_points.pop(storage_key, None)
+            clip_groups.setdefault((stored_start, end_time), []).append(video_path)
+
+        return clip_groups, recorded_count, invalid_count
 
     def _build_vclip_keyboard(
         self, session_id: str, results: list[str], selected: set[int]
@@ -930,8 +980,9 @@ class Main(star.Star):
         if session_type == "vclip":
             results = session["results"]
             selected = session["selected"]
-            start_time = session["start_time"]
-            end_time = session["end_time"]
+            start_time = session.get("start_time", "")
+            end_time = session.get("end_time", "")
+            point_time = session.get("point_time")
             keyword = session["keyword"]
 
             if action == "cancel":
@@ -948,7 +999,12 @@ class Main(star.Star):
                 )
                 await self._edit_telegram_menu(
                     event,
-                    self._build_vclip_message(results, keyword, start_time, end_time),
+                    self._build_vclip_message(
+                        results,
+                        keyword,
+                        point_time if point_time is not None else start_time,
+                        "" if point_time is not None else end_time,
+                    ),
                     self._build_vclip_keyboard(session_id, results, selected),
                 )
                 return
@@ -957,11 +1013,53 @@ class Main(star.Star):
                     await event.answer_callback_query(text="请至少选择一个文件")
                     return
                 selected_files = [results[i] for i in sorted(selected)]
+
+                if point_time:
+                    origin = session.get("origin", event.unified_msg_origin)
+                    (
+                        clip_groups,
+                        recorded_count,
+                        invalid_count,
+                    ) = self._consume_vclip_point_selection(
+                        origin, selected_files, point_time
+                    )
+
                 self._close_telegram_selection_session(session_id)
-                await event.answer_callback_query()
-                await self._process_video_clip(
-                    event, selected_files, start_time, end_time
-                )
+                if not point_time:
+                    await event.answer_callback_query()
+                    await self._process_video_clip(
+                        event, selected_files, start_time, end_time
+                    )
+                    return
+
+                if clip_groups:
+                    status_parts = []
+                    if recorded_count:
+                        status_parts.append(f"已记录 {recorded_count} 个文件的开始时间")
+                    if invalid_count:
+                        status_parts.append(
+                            f"{invalid_count} 个文件的结束时间必须晚于开始时间"
+                        )
+                    if status_parts:
+                        await event.answer_callback_query(text="，".join(status_parts))
+                    else:
+                        await event.answer_callback_query()
+                    for (group_start, group_end), group_paths in clip_groups.items():
+                        await self._process_video_clip(
+                            event, group_paths, group_start, group_end
+                        )
+                    return
+
+                status_parts = []
+                if recorded_count:
+                    status_parts.append(f"已记录 {recorded_count} 个文件的开始时间")
+                if invalid_count:
+                    status_parts.append(
+                        f"{invalid_count} 个文件的结束时间必须晚于开始时间"
+                    )
+                status = "，".join(status_parts) or "未处理任何文件"
+                await event.answer_callback_query(text=status)
+                await self._edit_telegram_menu(event, f"{status}。", None)
                 return
 
             try:
@@ -977,7 +1075,12 @@ class Main(star.Star):
                 session["selected"] = selected
                 await self._edit_telegram_menu(
                     event,
-                    self._build_vclip_message(results, keyword, start_time, end_time),
+                    self._build_vclip_message(
+                        results,
+                        keyword,
+                        point_time if point_time is not None else start_time,
+                        "" if point_time is not None else end_time,
+                    ),
                     self._build_vclip_keyboard(session_id, results, selected),
                 )
             except ValueError:
@@ -1418,7 +1521,8 @@ class Main(star.Star):
         Usage:
             /vclip <keyword> <start_time> <end_time> - Clip video segment
             /vclip <keyword> <HMMSS-HMMSS> - Clip by compact time interval
-            Time format: HH:MM:SS, MM:SS, or HMMSS-HMMSS / HHMMSS-HHMMSS
+            /vclip <keyword> <time_point> - Save a start point, then clip on the next call
+            Time format: HH:MM:SS, MM:SS, compact time point, or compact interval
             Example: /vclip movie 00:05:30 00:10:45
             Example: /vclip movie 10101-20356
         """
@@ -1434,15 +1538,18 @@ class Main(star.Star):
                 "用法:\n"
                 "/vclip <关键词> <开始时间> <结束时间>\n"
                 "/vclip <关键词> <HMMSS-HMMSS>\n"
-                "时间格式: HH:MM:SS、MM:SS 或 HMMSS-HMMSS/HHMMSS-HHMMSS\n"
+                "/vclip <关键词> <时间点>（连续输入两次后剪辑）\n"
+                "时间格式: HH:MM:SS、MM:SS、单个紧凑时间点或时间区间\n"
                 "示例: /vclip movie 00:05:30 00:10:45\n"
-                "示例: /vclip movie 10101-20356"
+                "示例: /vclip movie 10101-20356\n"
+                "示例: /vclip movie 00:05:30，然后再次输入 /vclip movie 00:10:45"
             )
             return
 
         keyword = parts[0]
         start_time = ""
         end_time = ""
+        point_time: str | None = None
 
         if len(parts) >= 3:
             start_time = parts[1].replace("：", ":")
@@ -1456,28 +1563,42 @@ class Main(star.Star):
         else:
             compact_interval = parts[1].strip().replace("－", "-")
             parsed_interval = parse_compact_time_interval(compact_interval)
-            if not parsed_interval:
+            if parsed_interval:
+                start_time, end_time = parsed_interval
+            else:
+                point_time = parts[1].strip().replace("：", ":")
+                compact_point = parse_compact_time_format(point_time)
+                if compact_point:
+                    point_time = compact_point
+                elif validate_time_format(point_time):
+                    point_time = normalize_time_format(point_time)
+                else:
+                    point_time = None
+
+            if not parsed_interval and point_time is None:
                 yield event.plain_result(
-                    "无效的时间区间格式，请使用 HMMSS-HMMSS 或 HHMMSS-HHMMSS\n"
-                    "示例: 10101-20356"
+                    "无效的时间格式，请使用 HH:MM:SS、MM:SS、单个时间点或"
+                    " HMMSS-HMMSS/HHMMSS-HHMMSS\n"
+                    "示例: /vclip movie 00:05:30\n"
+                    "示例: /vclip movie 10101-20356"
                 )
                 return
-            start_time, end_time = parsed_interval
 
-        start_time = normalize_time_format(start_time)
-        end_time = normalize_time_format(end_time)
+        if point_time is None:
+            start_time = normalize_time_format(start_time)
+            end_time = normalize_time_format(end_time)
 
-        start_seconds = sum(
-            int(v) * m for v, m in zip(start_time.split(":"), (3600, 60, 1))
-        )
-        end_seconds = sum(
-            int(v) * m for v, m in zip(end_time.split(":"), (3600, 60, 1))
-        )
-        if end_seconds <= start_seconds:
-            yield event.plain_result(
-                f"结束时间必须晚于开始时间\n⏱ {start_time} → {end_time}"
+            start_seconds = sum(
+                int(v) * m for v, m in zip(start_time.split(":"), (3600, 60, 1))
             )
-            return
+            end_seconds = sum(
+                int(v) * m for v, m in zip(end_time.split(":"), (3600, 60, 1))
+            )
+            if end_seconds <= start_seconds:
+                yield event.plain_result(
+                    f"结束时间必须晚于开始时间\n⏱ {start_time} → {end_time}"
+                )
+                return
 
         selector = FileSelector(self.config)
         results = await selector.search_files(keyword, limit=15)
@@ -1486,8 +1607,34 @@ class Main(star.Star):
             yield event.plain_result(f"未找到匹配「{keyword}」的文件")
             return
 
-        # Store time parameters in a closure
-        time_params = (start_time, end_time)
+        if point_time is not None and len(results) == 1:
+            video_path = results[0]
+            storage_key = (event.unified_msg_origin, video_path)
+            stored_start = self._vclip_time_points.get(storage_key)
+            if stored_start is None:
+                self._vclip_time_points[storage_key] = point_time
+                yield event.plain_result(
+                    f"已记录文件「{Path(video_path).name}」的开始时间: {point_time}\n"
+                    "请再次使用 /vclip 输入结束时间以开始剪辑。"
+                )
+                return
+
+            start_seconds = sum(
+                int(v) * m for v, m in zip(stored_start.split(":"), (3600, 60, 1))
+            )
+            end_seconds = sum(
+                int(v) * m for v, m in zip(point_time.split(":"), (3600, 60, 1))
+            )
+            if end_seconds <= start_seconds:
+                yield event.plain_result(
+                    f"结束时间必须晚于开始时间\n⏱ {stored_start} → {point_time}"
+                )
+                return
+
+            self._vclip_time_points.pop(storage_key, None)
+            start_time = stored_start
+            end_time = point_time
+            point_time = None
 
         # Single file - process directly
         if len(results) == 1:
@@ -1505,7 +1652,12 @@ class Main(star.Star):
         session_id = uuid.uuid4().hex[:8] if is_telegram else ""
         session_state = {"closed": False}
         menu_message_id: int | None = None
-        msg = self._build_vclip_message(results, keyword, start_time, end_time)
+        msg = self._build_vclip_message(
+            results,
+            keyword,
+            point_time if point_time is not None else start_time,
+            "" if point_time is not None else end_time,
+        )
 
         if is_telegram:
             menu_message_id = await self._send_telegram_menu(
@@ -1520,6 +1672,7 @@ class Main(star.Star):
                 "keyword": keyword,
                 "start_time": start_time,
                 "end_time": end_time,
+                "point_time": point_time,
                 "message_id": menu_message_id,
                 "closed": False,
                 "state": session_state,
@@ -1595,6 +1748,67 @@ class Main(star.Star):
                 return
 
             selected_files = [results[i] for i in selected]
+
+            if point_time is not None:
+                origin = (
+                    telegram_session.get("origin")
+                    if telegram_session
+                    else reply_event.unified_msg_origin
+                )
+                (
+                    clip_groups,
+                    recorded_count,
+                    invalid_count,
+                ) = self._consume_vclip_point_selection(
+                    origin, selected_files, point_time
+                )
+
+                status_parts = []
+                if recorded_count:
+                    status_parts.append(f"已记录 {recorded_count} 个文件的开始时间")
+                if invalid_count:
+                    status_parts.append(
+                        f"{invalid_count} 个文件的结束时间必须晚于开始时间"
+                    )
+
+                if is_telegram:
+                    await self._delete_telegram_reply(reply_event)
+                    self._close_telegram_selection_session(session_id)
+                    if clip_groups:
+                        setattr(
+                            reply_event, "_auex_progress_message_id", menu_message_id
+                        )
+                    else:
+                        status = "，".join(status_parts) or "未处理任何文件"
+                        await self._edit_telegram_menu(
+                            reply_event,
+                            f"{status}。",
+                            None,
+                            message_id=menu_message_id,
+                        )
+                else:
+                    if clip_groups:
+                        summary = "，".join(status_parts)
+                        await reply_event.send(
+                            reply_event.plain_result(
+                                f"{summary + '，' if summary else ''}开始剪辑..."
+                            )
+                        )
+                    else:
+                        await reply_event.send(
+                            reply_event.plain_result(
+                                f"{('，'.join(status_parts) or '未处理任何文件')}。"
+                            )
+                        )
+
+                if not is_telegram:
+                    controller.stop()
+                for (group_start, group_end), group_paths in clip_groups.items():
+                    await self._process_video_clip(
+                        reply_event, group_paths, group_start, group_end
+                    )
+                return
+
             if is_telegram:
                 await self._delete_telegram_reply(reply_event)
                 self._close_telegram_selection_session(session_id)
@@ -1610,7 +1824,7 @@ class Main(star.Star):
             if not is_telegram:
                 controller.stop()
             await self._process_video_clip(
-                reply_event, selected_files, time_params[0], time_params[1]
+                reply_event, selected_files, start_time, end_time
             )
 
         try:
